@@ -18,9 +18,9 @@
  */
 package de.catma.indexer.db;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import static de.catma.repository.db.jooqgen.catmaindex.Tables.PROPERTY;
+import static de.catma.repository.db.jooqgen.catmaindex.Tables.TAGREFERENCE;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,154 +28,163 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.logging.Logger;
 
-import org.hibernate.Criteria;
-import org.hibernate.Query;
-import org.hibernate.Session;
-import org.hibernate.SessionFactory;
-import org.hibernate.criterion.Restrictions;
+import javax.naming.Context;
+import javax.naming.InitialContext;
+import javax.naming.NamingException;
+import javax.sql.DataSource;
 
-import de.catma.db.CloseableSession;
+import org.jooq.DSLContext;
+import org.jooq.Record;
+import org.jooq.Result;
+import org.jooq.SQLDialect;
+import org.jooq.Select;
+import org.jooq.SelectConditionStep;
+import org.jooq.SelectOnConditionStep;
+import org.jooq.impl.DSL;
+
 import de.catma.document.Range;
-import de.catma.indexer.db.model.DBIndexProperty;
-import de.catma.indexer.db.model.DBIndexTagReference;
 import de.catma.queryengine.result.QueryResult;
 import de.catma.queryengine.result.TagQueryResult;
 import de.catma.queryengine.result.TagQueryResultRow;
-import de.catma.util.CloseSafe;
 import de.catma.util.IDGenerator;
 
 public class TagDefinitionSearcher {
 
-	private SessionFactory sessionFactory;
-	private Logger logger = Logger.getLogger(this.getClass().getName());
+	private IDGenerator idGenerator;
 
-	public TagDefinitionSearcher(SessionFactory sessionFactory) {
-		this.sessionFactory = sessionFactory;
+	private Logger logger = Logger.getLogger(this.getClass().getName());
+	private DataSource dataSource;
+
+	public TagDefinitionSearcher() throws NamingException {
+		this.idGenerator = new IDGenerator();
+		Context  context = new InitialContext();
+		this.dataSource = (DataSource) context.lookup("catmads");
 	}
 
 	public QueryResult search(
 			List<String> userMarkupCollectionIdList, String tagDefinitionPath) {
-		
-		Session session = sessionFactory.openSession();
-		try {
-			List<DBIndexTagReference> tagReferences  = 
-					searchInUserMarkupCollection(
-							session, userMarkupCollectionIdList, tagDefinitionPath);
-			logger.info(
-				"Query for " + tagDefinitionPath + " has " + 
-						tagReferences.size() + " results.");
-			return createTagQueryResult(tagReferences, tagDefinitionPath);
-		}
-		finally {
-			CloseSafe.close(new CloseableSession(session));
-		}
+		return searchInUserMarkupCollection(userMarkupCollectionIdList, tagDefinitionPath);
 	}
 	
-	private QueryResult createTagQueryResult(
-			List<DBIndexTagReference> tagReferences, String group) {
-		TagQueryResult result = new TagQueryResult(group);
-		
-		HashMap<String, Set<DBIndexTagReference>> groupByInstance = 
-				new HashMap<String, Set<DBIndexTagReference>>();
-		for (DBIndexTagReference tr : tagReferences) {
-			String tagInstanceId = 
-					tr.getCatmaTagInstanceId();
-			
-			if (!groupByInstance.containsKey(tagInstanceId)) {
-				groupByInstance.put(
-						tagInstanceId, new HashSet<DBIndexTagReference>());
-			}
-			groupByInstance.get(tagInstanceId).add(tr);
-		}
-		
-		for (Map.Entry<String,Set<DBIndexTagReference>> entry :
-			groupByInstance.entrySet()) {
-			
-			SortedSet<Range> ranges = new TreeSet<Range>();
-			for (DBIndexTagReference tr : entry.getValue()) {
-				ranges.add(
-					new Range(tr.getCharacterStart(), tr.getCharacterEnd()));
-			}
-			DBIndexTagReference firstDBTagRef = entry.getValue().iterator().next();
-			
-			List<Range> mergedRanges = Range.mergeRanges(ranges);
-			result.add(
-				new TagQueryResultRow(
-					firstDBTagRef.getDocumentId(),
-					mergedRanges, 
-					firstDBTagRef.getUserMarkupCollectionId(),
-					firstDBTagRef.getCatmaTagDefinitionId(),
-					entry.getKey()));
-		}
-		
-		return result;
-	}
 
-	@SuppressWarnings("unchecked")
-	private List<DBIndexTagReference> searchInUserMarkupCollection(
-			Session session, List<String> userMarkupCollectionIdList, 
+	private QueryResult searchInUserMarkupCollection(
+			List<String> userMarkupCollectionIdList, 
 			String tagDefinitionPath) {
 		
 		if (!tagDefinitionPath.startsWith("/")) {
 			tagDefinitionPath = "%" + tagDefinitionPath;
 		}
 		
-		Criteria criteria = session.createCriteria(DBIndexTagReference.class).
-				add(Restrictions.ilike("tagDefinitionPath", tagDefinitionPath));
+		DSLContext db = DSL.using(dataSource, SQLDialect.MYSQL);
 		
-		if (!userMarkupCollectionIdList.isEmpty()) {
-			criteria.add(
-				Restrictions.in(
-					"userMarkupCollectionId", userMarkupCollectionIdList));
-		}
+		Map<byte[], Result<Record>> recordsGroupedByInstanceUUID = db
+		.select()
+		.from(TAGREFERENCE)
+		.where(TAGREFERENCE.TAGDEFINITIONPATH.likeIgnoreCase(tagDefinitionPath))
+		.and(TAGREFERENCE.USERMARKUPCOLLECTIONID.in(userMarkupCollectionIdList))
+		.fetchGroups(TAGREFERENCE.TAGINSTANCEID);
 		
-		return criteria.list();
+		return createTagQueryResult(recordsGroupedByInstanceUUID, tagDefinitionPath, false);
+		
 	}
 
+	private QueryResult createTagQueryResult(
+			Map<byte[], Result<Record>> recordsGroupedByInstanceUUID, 
+			String resultGroupKey, boolean keepProperties) {
+		TagQueryResult result = new TagQueryResult(resultGroupKey);
+		
+		for (Map.Entry<byte[], Result<Record>> entry : 
+				recordsGroupedByInstanceUUID.entrySet()) {
+			
+			Record masterRecord = null;
+			
+			SortedSet<Range> ranges = new TreeSet<Range>();
+			for (Record r : entry.getValue()) {
+				ranges.add(
+					new Range(
+						r.getValue(TAGREFERENCE.CHARACTERSTART), 
+						r.getValue(TAGREFERENCE.CHARACTEREND)));
+				if (masterRecord == null) {
+					masterRecord = r;
+				}
+			}
+			List<Range> mergedRanges = Range.mergeRanges(ranges);
 
-	public QueryResult searchProperties(Set<String> propertyDefinitionIDs,
-			String propertyName,
-			String propertyValue) {
-		IDGenerator idGenerator = new IDGenerator();
-		List<byte[]> byteUuidSet = new ArrayList<byte[]>();
-		
-		for (String propertyDefinitionID : propertyDefinitionIDs) {
-			byteUuidSet.add(idGenerator.catmaIDToUUIDBytes(propertyDefinitionID));
+			if (keepProperties) {
+				result.add(
+					new TagQueryResultRow(
+						masterRecord.getValue(TAGREFERENCE.DOCUMENTID),
+						mergedRanges, 
+						masterRecord.getValue(TAGREFERENCE.USERMARKUPCOLLECTIONID),
+						idGenerator.uuidBytesToCatmaID(
+								masterRecord.getValue(TAGREFERENCE.TAGDEFINITIONID)),
+						idGenerator.uuidBytesToCatmaID(
+								masterRecord.getValue(TAGREFERENCE.TAGINSTANCEID)),
+						idGenerator.uuidBytesToCatmaID(
+								masterRecord.getValue(PROPERTY.PROPERTYDEFINITIONID)),
+						masterRecord.getValue(PROPERTY.VALUE)
+					));
+			}
+			else {
+				result.add(
+					new TagQueryResultRow(
+						masterRecord.getValue(TAGREFERENCE.DOCUMENTID),
+						mergedRanges, 
+						masterRecord.getValue(TAGREFERENCE.USERMARKUPCOLLECTIONID),
+						idGenerator.uuidBytesToCatmaID(
+								masterRecord.getValue(TAGREFERENCE.TAGDEFINITIONID)),
+						idGenerator.uuidBytesToCatmaID(
+								masterRecord.getValue(TAGREFERENCE.TAGINSTANCEID))
+					));
+			}
 		}
+		return result;
+	}
+
+	public QueryResult searchProperties(
+			List<String> userMarkupCollectionIdList, 
+			Set<String> propertyDefinitionIDs,
+			String propertyName,
+			String propertyValue, String tagDefinitionPath) {
 		
 		
-		String hql = " select tr from " + 
-				DBIndexTagReference.class.getSimpleName() + " tr, " +
-				DBIndexProperty.class.getSimpleName() + " p " +
-				" where tr.tagInstanceId = p.tagInstanceId and " +
-				" p.propertyDefinitionId in :byteUuidSet ";
+		DSLContext db = DSL.using(dataSource, SQLDialect.MYSQL);
+		
+		Select<Record> selectQuery = db
+		.select()
+		.from(TAGREFERENCE)
+		.join(PROPERTY)
+			.on(PROPERTY.TAGINSTANCEID.eq(TAGREFERENCE.TAGINSTANCEID))
+			.and(PROPERTY.NAME.likeIgnoreCase(propertyName));
+//			.and(PROPERTY.PROPERTYDEFINITIONID.in(
+//				Collections2.transform(
+//						propertyDefinitionIDs, 
+//						new UUIDtoByteMapper())));
 		
 		if ((propertyValue != null) && (!propertyValue.isEmpty())) {
-			hql += " and p.value = :propertyValue";
-		}
+			
+			selectQuery = ((SelectOnConditionStep<Record>)selectQuery).and(PROPERTY.VALUE.eq(propertyValue));
+		}		
 		
-		Session session = sessionFactory.openSession();
-		try {
-			Query query = session.createQuery(hql);
-			
-			query.setParameterList("byteUuidSet", byteUuidSet);
-			
-			if ((propertyValue != null) && (!propertyValue.isEmpty())) {
-				query.setParameter("propertyValue", propertyValue);
+		selectQuery = ((SelectOnConditionStep<Record>)selectQuery).where(
+				TAGREFERENCE.USERMARKUPCOLLECTIONID.in(userMarkupCollectionIdList));
+		
+		
+		if ((tagDefinitionPath != null) && (!tagDefinitionPath.isEmpty())) {
+			if (!tagDefinitionPath.startsWith("/")) {
+				tagDefinitionPath = "%" + tagDefinitionPath;
 			}
-
-			@SuppressWarnings("unchecked")
-			List<DBIndexTagReference> dbTagReferences = query.list();
+			selectQuery = ((SelectConditionStep<Record>)selectQuery).and(
+					TAGREFERENCE.TAGDEFINITIONPATH.likeIgnoreCase(tagDefinitionPath));
+		}
 		
-			return createTagQueryResult(
-				dbTagReferences, 
-				propertyName + 
+		Map<byte[], Result<Record>> recordsGroupedByInstanceUUID = 
+				selectQuery.fetchGroups(TAGREFERENCE.TAGINSTANCEID);
+		
+		return createTagQueryResult(
+			recordsGroupedByInstanceUUID, 
+			propertyName + 
 					(((propertyValue==null)||propertyValue.isEmpty())?"":
-						(":"+propertyValue)));
-		}
-		finally {
-			CloseSafe.close(new CloseableSession(session));
-		}
+						(":"+propertyValue)), true);
 	}
-
 }

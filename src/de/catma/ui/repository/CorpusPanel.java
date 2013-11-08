@@ -28,6 +28,7 @@ import com.vaadin.data.Property;
 import com.vaadin.data.Property.ValueChangeEvent;
 import com.vaadin.data.Property.ValueChangeListener;
 import com.vaadin.data.util.AbstractProperty;
+import com.vaadin.data.util.BeanItem;
 import com.vaadin.data.util.HierarchicalContainer;
 import com.vaadin.data.util.PropertysetItem;
 import com.vaadin.event.DataBoundTransferable;
@@ -53,15 +54,18 @@ import com.vaadin.ui.themes.Reindeer;
 
 import de.catma.CatmaApplication;
 import de.catma.document.Corpus;
-import de.catma.document.repository.AccessMode;
 import de.catma.document.repository.Repository;
+import de.catma.document.repository.UnknownUserException;
 import de.catma.document.source.SourceDocument;
 import de.catma.document.standoffmarkup.staticmarkup.StaticMarkupCollectionReference;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionReference;
 import de.catma.indexer.IndexedRepository;
 import de.catma.ui.analyzer.AnalyzerProvider;
+import de.catma.ui.dialog.FormDialog;
 import de.catma.ui.dialog.SaveCancelListener;
 import de.catma.ui.dialog.SingleValueDialog;
+import de.catma.ui.repository.sharing.SharingOptions;
+import de.catma.ui.repository.sharing.SharingOptionsFieldFactory;
 
 public class CorpusPanel extends VerticalLayout {
 	private static class CorpusProperty extends AbstractProperty {
@@ -142,6 +146,13 @@ public class CorpusPanel extends VerticalLayout {
 				else { //update name
 					if (evt.getOldValue() instanceof String) {
 						corporaTree.requestRepaint();
+					}
+					else if (evt.getOldValue() instanceof Corpus) {
+						Corpus oldCorpus = (Corpus) evt.getOldValue();
+						removeCorpusFromTree(oldCorpus);
+						Corpus newCorpus = (Corpus) evt.getNewValue();
+						addCorpusToTree(newCorpus);
+						corporaTree.setValue(newCorpus);
 					}
  				}
 			}
@@ -234,8 +245,17 @@ public class CorpusPanel extends VerticalLayout {
 							}
 						}
 					}
-					((AnalyzerProvider)getApplication()).analyze(
-							selectedCorpus, (IndexedRepository)repository);
+					
+					if (selectedCorpus.getSourceDocuments().isEmpty()) {
+						getWindow().showNotification(
+							"Information", "The corpus is empty! " +
+									"Please add some documents first!",
+								Notification.TYPE_TRAY_NOTIFICATION);
+					}
+					else {
+						((AnalyzerProvider)getApplication()).analyze(
+								selectedCorpus, (IndexedRepository)repository);
+					}
 				}
 				else {
 					getWindow().showNotification("Information", "Please select a corpus first!",
@@ -292,33 +312,36 @@ public class CorpusPanel extends VerticalLayout {
 	}
 	
 	protected void handleShareCorpusRequest(final Corpus corpus) {
-		final String userIdentificationPropertyName = "Share with (email)";
+		SharingOptions sharingOptions = new SharingOptions();
 		
-		SingleValueDialog singleValueDialog = new SingleValueDialog();
-		
-		singleValueDialog.getSingleValue(
-				getApplication().getMainWindow(),
-				"Please enter the user name of the person you want to share with",
-				"You have to enter a name!",
-				new SaveCancelListener<PropertysetItem>() {
-			public void cancelPressed() {}
-			public void savePressed(
-					PropertysetItem propertysetItem) {
-				Property property = 
-						propertysetItem.getItemProperty(
-								userIdentificationPropertyName);
-				String userIdent = (String)property.getValue();
-				try {
-					repository.share(
-							corpus, 
-							userIdent, AccessMode.READ);
-				} catch (IOException e) {
-					((CatmaApplication)getApplication()).showAndLogError(
-						"Error sharing this corpus!", e);
+		FormDialog<SharingOptions> sharingOptionsDlg = new FormDialog<SharingOptions>(
+			"Please enter the person you want to share with", 
+			new BeanItem<SharingOptions>(sharingOptions),
+			new SharingOptionsFieldFactory(), 
+			new SaveCancelListener<SharingOptions>() {
+				public void cancelPressed() {}
+				public void savePressed(SharingOptions result) {
+					try {
+						repository.share(
+								corpus, 
+								result.getUserIdentification(), 
+								result.getAccessMode());
+					} catch (IOException e) {
+						if (e.getCause() instanceof UnknownUserException) {
+							getWindow().showNotification(
+									"Sharing failed!", e.getCause().getMessage(), 
+									Notification.TYPE_WARNING_MESSAGE);
+						}
+						else {
+							((CatmaApplication)getApplication()).showAndLogError(
+								"Error sharing this corpus!", e);
+						}
+					}
 				}
-			}
-		}, userIdentificationPropertyName);
-
+			});
+		sharingOptionsDlg.setVisibleItemProperties(
+				new Object[] {"userIdentification", "accessMode"});
+		sharingOptionsDlg.show(getApplication().getMainWindow());
 	}
 
 	private void handleRenameCorpusRequest(final Corpus corpus) {
@@ -393,13 +416,15 @@ public class CorpusPanel extends VerticalLayout {
 			}
 			else {
 				getWindow().showNotification(
-					"Information", "You can only add " +
-							"Source Documents and Markup Collections to a Corpus!",
-							Notification.TYPE_TRAY_NOTIFICATION);
+					"Information", 
+					"You can only add " +
+						"Source Documents and Markup Collections to a Corpus!",
+						Notification.TYPE_TRAY_NOTIFICATION);
 			}
 		}
 		catch (IOException e) {
-			e.printStackTrace(); //TODO: handle
+			((CatmaApplication)getApplication()).showAndLogError(
+					"Error adding Item to Corpus!", e);
 		}
 	}
 
@@ -496,6 +521,21 @@ public class CorpusPanel extends VerticalLayout {
 				corpusChangedListener);
 	}
 
+	public Corpus getSelectedCorpus() {
+		Object itemId = corporaTree.getValue();
+		if (itemId instanceof Corpus) {
+			return (Corpus)itemId;
+		}
+		return null;
+	}
 
+	public void setSelectedCorpus(Corpus corpus) {
+		if (corpus == null) {
+			corporaTree.setValue(allDocuments);
+		}
+		else {
+			corporaTree.setValue(corpus);
+		}
+	}
 }
 

@@ -27,11 +27,13 @@ import java.util.Set;
 
 import org.vaadin.dialogs.ConfirmDialog;
 
+import com.vaadin.addon.tableexport.ExcelExport;
 import com.vaadin.data.Property;
 import com.vaadin.data.Property.ValueChangeEvent;
 import com.vaadin.data.Property.ValueChangeListener;
 import com.vaadin.data.util.HierarchicalContainer;
 import com.vaadin.terminal.ClassResource;
+import com.vaadin.terminal.ThemeResource;
 import com.vaadin.ui.AbstractComponent;
 import com.vaadin.ui.Alignment;
 import com.vaadin.ui.Button;
@@ -47,6 +49,7 @@ import com.vaadin.ui.Window.Notification;
 
 import de.catma.CatmaApplication;
 import de.catma.document.repository.Repository;
+import de.catma.document.source.ContentInfoSet;
 import de.catma.document.source.SourceDocument;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollection;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionManager;
@@ -60,9 +63,9 @@ import de.catma.queryengine.result.QueryResultRowArray;
 import de.catma.queryengine.result.TagQueryResult;
 import de.catma.queryengine.result.TagQueryResultRow;
 import de.catma.tag.TagDefinition;
+import de.catma.ui.HierarchicalExcelExport;
 import de.catma.ui.data.util.PropertyDependentItemSorter;
 import de.catma.ui.data.util.PropertyToTrimmedStringCIComparator;
-import de.catma.util.ContentInfoSet;
 
 public class MarkupResultPanel extends VerticalLayout {
 	
@@ -188,8 +191,13 @@ public class MarkupResultPanel extends VerticalLayout {
 	
 	private static enum TreePropertyName {
 		caption,
+		propertyname,
+		propertyvalue,
 		frequency, 
-		visible,
+		visible, 
+		sourcedocument, 
+		markupcollection, 
+		phrase,
 		;
 	}
 	
@@ -203,6 +211,9 @@ public class MarkupResultPanel extends VerticalLayout {
 	private Button btSelectAll;
 	private Button btDeselectAll;
 	private Button btUntagResults;
+	private Button btResultExcelExport;
+	private Button btKwicExcelExport;
+	private CheckBox cbFlatTable;
 	
 	public MarkupResultPanel(
 			Repository repository, 
@@ -224,6 +235,28 @@ public class MarkupResultPanel extends VerticalLayout {
 	}
 	
 	private void initActions() {
+		cbFlatTable.addListener(new ValueChangeListener() {
+			
+			public void valueChange(ValueChangeEvent event) {
+				QueryResultRowArray queryResult = new QueryResultRowArray();
+
+				for (Object itemId : resultTable.getItemIds()) {
+					if (itemId instanceof RowWrapper) {
+						queryResult.add(((RowWrapper)itemId).row);
+					}
+					else {
+						collectQueryResultRows(queryResult, itemId);
+					}
+				}		
+
+				try {
+					setQueryResult(queryResult);
+				} catch (IOException e) {
+					((CatmaApplication)getApplication()).showAndLogError(
+							"error converting Query Result!", e);
+				}
+			}
+		});
 		btDist.addListener(new ClickListener() {
 			
 			@SuppressWarnings("unchecked")
@@ -277,8 +310,43 @@ public class MarkupResultPanel extends VerticalLayout {
 				untagResults();
 			}
 		});
+		
+		btKwicExcelExport.addListener(new ClickListener() {
+			
+			public void buttonClick(ClickEvent event) {
+            	ExcelExport excelExport = 
+            			new HierarchicalExcelExport(kwicPanel.getKwicTable(), 
+            					"CATMA Query Result Kwic");
+                excelExport.excludeCollapsedColumns();
+                excelExport.setReportTitle("CATMA Query Result Kwic");
+                excelExport.export();
+			}
+		});
+
+		btResultExcelExport.addListener(new ClickListener() {
+			
+			public void buttonClick(ClickEvent event) {
+            	ExcelExport excelExport = 
+            			new HierarchicalExcelExport(resultTable, "CATMA Query Result");
+                excelExport.excludeCollapsedColumns();
+                excelExport.setReportTitle("CATMA Query Result");
+                excelExport.export();
+			}
+		});
 	}
 	
+	private void collectQueryResultRows(QueryResultRowArray queryResult, Object startItemId) {
+		Collection<?> children = resultTable.getChildren(startItemId);
+		for (Object itemId : children) {
+			if (itemId instanceof RowWrapper) {
+				queryResult.add(((RowWrapper)itemId).row);
+			}
+			else {
+				collectQueryResultRows(queryResult, itemId);
+			}
+		}
+	}
+
 	private void untagResults() {
 		final Set<QueryResultRow> selection = kwicPanel.getSelection();
 		if ((selection != null) && !selection.isEmpty()) {
@@ -414,6 +482,27 @@ public class MarkupResultPanel extends VerticalLayout {
 		resultTable.addContainerProperty(
 				TreePropertyName.caption, String.class, null);
 		resultTable.setColumnHeader(TreePropertyName.caption, "Tag Definition");
+		
+		resultTable.addContainerProperty(
+				TreePropertyName.sourcedocument, String.class, null);
+		resultTable.setColumnHeader(TreePropertyName.sourcedocument, "Source Document");
+		
+		resultTable.addContainerProperty(
+				TreePropertyName.markupcollection, String.class, null);
+		resultTable.setColumnHeader(TreePropertyName.markupcollection, "Markup Collection");
+
+		resultTable.addContainerProperty(
+				TreePropertyName.phrase, String.class, null);
+		resultTable.setColumnHeader(TreePropertyName.phrase, "Phrase");
+
+		resultTable.addContainerProperty(
+				TreePropertyName.propertyname, String.class, null);
+		resultTable.setColumnHeader(TreePropertyName.propertyname, "Property");
+
+		resultTable.addContainerProperty(
+				TreePropertyName.propertyvalue, String.class, null);
+		resultTable.setColumnHeader(TreePropertyName.propertyvalue, "Property value");
+		
 		resultTable.addContainerProperty(
 				TreePropertyName.frequency, Integer.class, null);
 		resultTable.setColumnHeader(TreePropertyName.frequency, "Frequency");
@@ -424,6 +513,16 @@ public class MarkupResultPanel extends VerticalLayout {
 		resultTable.setItemCaptionPropertyId(TreePropertyName.caption);
 		resultTable.setPageLength(10); //TODO: config
 		resultTable.setSizeFull();
+		resultTable.setColumnCollapsingAllowed(true);
+		resultTable.setColumnCollapsible(TreePropertyName.caption, false);
+		resultTable.setColumnCollapsible(TreePropertyName.sourcedocument, true);
+		resultTable.setColumnCollapsible(TreePropertyName.markupcollection, true);
+		resultTable.setColumnCollapsible(TreePropertyName.phrase, true);
+		resultTable.setColumnCollapsible(TreePropertyName.propertyname, true);
+		resultTable.setColumnCollapsible(TreePropertyName.propertyvalue, true);
+		resultTable.setColumnCollapsible(TreePropertyName.frequency, false);
+		resultTable.setColumnCollapsible(TreePropertyName.visible, false);
+		
 		//TODO: a description generator that shows the version of a Tag
 //		resultTable.setItemDescriptionGenerator(generator);
 		
@@ -440,11 +539,24 @@ public class MarkupResultPanel extends VerticalLayout {
 				getApplication()));
 		buttonPanel.addComponent(btDist);
 		
+		btResultExcelExport = new Button();
+		btResultExcelExport.setIcon(new ThemeResource("../images/table-excel.png"));
+		btResultExcelExport.setDescription(
+				"Export all Query result data as an Excel spreadsheet.");
+		buttonPanel.addComponent(btResultExcelExport);
+		
+		cbFlatTable = new CheckBox("flat table", false);
+		cbFlatTable.setImmediate(true);
+		
+		buttonPanel.addComponent(cbFlatTable);
+		buttonPanel.setComponentAlignment(cbFlatTable, Alignment.MIDDLE_RIGHT);
+		buttonPanel.setExpandRatio(cbFlatTable, 1f);
+		
 		btSelectAll = new Button("Select all for Kwic");
 		
 		buttonPanel.addComponent(btSelectAll);
 		buttonPanel.setComponentAlignment(btSelectAll, Alignment.MIDDLE_RIGHT);
-		buttonPanel.setExpandRatio(btSelectAll, 1f);
+//		buttonPanel.setExpandRatio(btSelectAll, 1f);
 		btDeselectAll = new Button("Deselect all for Kwic");
 		buttonPanel.addComponent(btDeselectAll);
 		buttonPanel.setComponentAlignment(btDeselectAll, Alignment.MIDDLE_RIGHT);
@@ -465,10 +577,20 @@ public class MarkupResultPanel extends VerticalLayout {
 		
 		HorizontalLayout kwicButtonPanel = new HorizontalLayout();
 		kwicButtonPanel.setSpacing(true);
+		kwicButtonPanel.setWidth("100%");
+		
+		btKwicExcelExport = new Button();
+		btKwicExcelExport.setIcon(new ThemeResource("../images/table-excel.png"));
+		btKwicExcelExport.setDescription(
+				"Export all Query result data as an Excel spreadsheet.");
+		kwicButtonPanel.addComponent(btKwicExcelExport);
+		kwicButtonPanel.setComponentAlignment(
+				btKwicExcelExport, Alignment.MIDDLE_LEFT);
 		
 		btUntagResults = new Button("Untag selected Kwics");
 		kwicButtonPanel.addComponent(btUntagResults);
 		kwicButtonPanel.setComponentAlignment(btUntagResults, Alignment.MIDDLE_RIGHT);
+		kwicButtonPanel.setExpandRatio(btUntagResults, 1f);
 		
 		Label helpLabel = new Label();
 		helpLabel.setIcon(new ClassResource(
@@ -500,23 +622,40 @@ public class MarkupResultPanel extends VerticalLayout {
 	public void setQueryResult(QueryResult queryResult) throws IOException {
 		kwicPanel.clear();
 		resultTable.removeAllItems();
+
 		int totalFreq = 0;
 	
 		HashMap<String, UserMarkupCollection> loadedUserMarkupCollections =
 				new HashMap<String, UserMarkupCollection>();
 		Set<String> tagDefinitions = new HashSet<String>();
-
-		if (!(queryResult instanceof GroupedQueryResultSet)) { // performace opt for Wordlists which are freqency based GroupedQueryResultSets 
+		boolean displayProperties = false;
+		
+		if (!(queryResult instanceof GroupedQueryResultSet)) { // performance opt for Wordlists which are freqency based GroupedQueryResultSets
+																// and we want to avoid expensive iteration
 			for (QueryResultRow row : queryResult) {
 				if (row instanceof TagQueryResultRow) {
 					TagQueryResultRow tRow = (TagQueryResultRow)row;
 					tagDefinitions.add(tRow.getTagDefinitionId());
-					addTagQueryResultRow(tRow, loadedUserMarkupCollections);
+					if (cbFlatTable.booleanValue()) {
+						addFlatTagQueryResultRow(tRow, loadedUserMarkupCollections);
+					}
+					else {
+						addTagQueryResultRow(tRow, loadedUserMarkupCollections);
+					}
+					if (!displayProperties && (tRow.getPropertyDefinitionId() != null)) {
+						displayProperties = true;
+					}
 					totalFreq++;
 				}
 			}
 		}
-
+		resultTable.setColumnCollapsed(TreePropertyName.sourcedocument, !cbFlatTable.booleanValue());
+		resultTable.setColumnCollapsed(TreePropertyName.markupcollection, !cbFlatTable.booleanValue());
+		resultTable.setColumnCollapsed(TreePropertyName.phrase, !cbFlatTable.booleanValue());
+		
+		resultTable.setColumnCollapsed(TreePropertyName.propertyname, !displayProperties);
+		resultTable.setColumnCollapsed(TreePropertyName.propertyvalue, !displayProperties);
+		
 		resultTable.setFooterVisible(true);
 		resultTable.setColumnFooter(
 				TreePropertyName.caption, 
@@ -526,6 +665,48 @@ public class MarkupResultPanel extends VerticalLayout {
 		
 	}
 	
+	private void addFlatTagQueryResultRow(TagQueryResultRow row,
+			HashMap<String, UserMarkupCollection> loadedUserMarkupCollections) throws IOException {
+		String tagDefinitionId = row.getTagDefinitionId();
+		String markupCollectionsId = row.getMarkupCollectionId();
+		SourceDocument sourceDocument = 
+				repository.getSourceDocument(row.getSourceDocumentId());
+		
+		if (!loadedUserMarkupCollections.containsKey(markupCollectionsId)) {
+			UserMarkupCollectionReference userMarkupCollRef = 
+				sourceDocument.getUserMarkupCollectionReference(
+						markupCollectionsId);
+		
+			loadedUserMarkupCollections.put(
+					markupCollectionsId,
+					repository.getUserMarkupCollection(userMarkupCollRef));
+		}
+		
+		UserMarkupCollection umc = 
+				loadedUserMarkupCollections.get(markupCollectionsId);
+		
+		TagDefinition tagDefinition = 
+				umc.getTagLibrary().getTagDefinition(tagDefinitionId);
+		
+		RowWrapper wrapper = new RowWrapper(row);
+		resultTable.addItem(
+			new Object[] {
+				umc.getTagLibrary().getTagPath(tagDefinition),
+				sourceDocument.toString(),
+				umc.getName(),
+				row.getPhrase(),
+				row.getPropertyDefinitionId()==null?"":
+					tagDefinition.getPropertyDefinition(
+							row.getPropertyDefinitionId()).getName(),
+				row.getPropertyDefinitionId()==null?"":row.getPropertyValue(),
+				1,
+				createCheckbox(
+						new TagQueryResultRowTreeEntrySelectionHandler(row))
+			}, wrapper);
+		
+		resultTable.setChildrenAllowed(wrapper, false);
+	}
+
 	private void addTagQueryResultRow(
 		final TagQueryResultRow row, 
 		Map<String,UserMarkupCollection> loadedUserMarkupCollections) 
@@ -557,6 +738,11 @@ public class MarkupResultPanel extends VerticalLayout {
 			resultTable.addItem(
 				new Object[]{
 						umc.getTagLibrary().getTagPath(tagDefinition),
+						"",
+						"",
+						"",
+						"",
+						"",
 						0,
 						createCheckbox(
 							new TagDefinitionTreeEntrySelectionHandler(
@@ -577,6 +763,11 @@ public class MarkupResultPanel extends VerticalLayout {
 			resultTable.addItem(
 				new Object[] {
 						sourceDocument.toString(),
+						"",
+						"",
+						"",
+						"",
+						"",
 						0,
 						createCheckbox(
 							new SourceDocumentTreeEntrySelectionHandler(
@@ -597,6 +788,11 @@ public class MarkupResultPanel extends VerticalLayout {
 			resultTable.addItem(
 				new Object[] {
 					umc.getName(),
+					"",
+					"",
+					"",
+					"",
+					"",
 					0,
 					createCheckbox(
 						new UmcTreeEntrySelectionHandler(resultTable, umcItemID))
@@ -613,6 +809,13 @@ public class MarkupResultPanel extends VerticalLayout {
 		resultTable.addItem(
 			new Object[] {
 				row.getPhrase(),
+				sourceDocument.toString(),
+				umc.getName(),
+				row.getPhrase(),
+				row.getPropertyDefinitionId()==null?"":
+					tagDefinition.getPropertyDefinition(
+							row.getPropertyDefinitionId()).getName(),
+				row.getPropertyDefinitionId()==null?"":row.getPropertyValue(),
 				1,
 				createCheckbox(
 						new TagQueryResultRowTreeEntrySelectionHandler(row))
@@ -620,7 +823,6 @@ public class MarkupResultPanel extends VerticalLayout {
 		
 		resultTable.setParent(wrapper, umcItemID);
 		resultTable.setChildrenAllowed(wrapper, false);
-		
 	}
 
 	private CheckBox createCheckbox(

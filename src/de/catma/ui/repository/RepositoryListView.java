@@ -27,9 +27,9 @@ import com.vaadin.ui.Alignment;
 import com.vaadin.ui.Button;
 import com.vaadin.ui.Button.ClickEvent;
 import com.vaadin.ui.Button.ClickListener;
-import com.vaadin.ui.Window.Notification;
 import com.vaadin.ui.Table;
 import com.vaadin.ui.VerticalLayout;
+import com.vaadin.ui.Window.Notification;
 
 import de.catma.CatmaApplication;
 import de.catma.document.repository.Repository;
@@ -70,10 +70,18 @@ public class RepositoryListView extends VerticalLayout implements TabComponent {
 					}
 					else {
 						try {
+							String user = 
+								((CatmaApplication)getApplication()).getParameter(
+										"user.name");
+							if (user == null) {
+								user = System.getProperty("user.name");
+							}
 							Map<String,String> userIdentification = 
 									new HashMap<String, String>(1);
 							userIdentification.put(
-								"user.ident", System.getProperty("user.name"));
+								"user.ident", user);
+							
+							getApplication().setUser(userIdentification);
 							
 							Repository repository = 
 									repositoryManager.openRepository(

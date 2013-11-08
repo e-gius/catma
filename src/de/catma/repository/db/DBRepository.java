@@ -18,35 +18,45 @@
  */
 package de.catma.repository.db;
 
+import static de.catma.repository.db.jooqgen.catmarepository.Tables.USER;
+import static de.catma.repository.db.jooqgen.catmarepository.Tables.USER_CORPUS;
+import static de.catma.repository.db.jooqgen.catmarepository.Tables.USER_SOURCEDOCUMENT;
+import static de.catma.repository.db.jooqgen.catmarepository.Tables.USER_TAGLIBRARY;
+import static de.catma.repository.db.jooqgen.catmarepository.Tables.USER_USERMARKUPCOLLECTION;
+
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Collection;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.naming.Context;
 import javax.naming.InitialContext;
+import javax.naming.NamingException;
+import javax.sql.DataSource;
 
-import org.hibernate.Query;
-import org.hibernate.Session;
-import org.hibernate.SessionFactory;
-import org.hibernate.cfg.Configuration;
-import org.hibernate.service.ServiceRegistry;
-import org.hibernate.service.ServiceRegistryBuilder;
+import org.jooq.DSLContext;
+import org.jooq.Record;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+
+import com.mchange.v2.c3p0.ComboPooledDataSource;
 
 import de.catma.backgroundservice.BackgroundServiceProvider;
 import de.catma.backgroundservice.DefaultProgressCallable;
 import de.catma.backgroundservice.ExecutionListener;
-import de.catma.db.CloseableSession;
 import de.catma.document.Corpus;
 import de.catma.document.repository.AccessMode;
+import de.catma.document.repository.UnknownUserException;
+import de.catma.document.source.ContentInfoSet;
 import de.catma.document.source.SourceDocument;
 import de.catma.document.standoffmarkup.staticmarkup.StaticMarkupCollection;
 import de.catma.document.standoffmarkup.staticmarkup.StaticMarkupCollectionReference;
@@ -56,16 +66,9 @@ import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionReference
 import de.catma.indexer.IndexedRepository;
 import de.catma.indexer.Indexer;
 import de.catma.indexer.IndexerFactory;
-import de.catma.indexer.IndexerPropertyKey;
-import de.catma.repository.db.model.DBCorpus;
-import de.catma.repository.db.model.DBSourceDocument;
-import de.catma.repository.db.model.DBTagLibrary;
-import de.catma.repository.db.model.DBUser;
-import de.catma.repository.db.model.DBUserCorpus;
-import de.catma.repository.db.model.DBUserMarkupCollection;
-import de.catma.repository.db.model.DBUserSourceDocument;
-import de.catma.repository.db.model.DBUserTagLibrary;
-import de.catma.repository.db.model.DBUserUserMarkupCollection;
+import de.catma.repository.db.jooq.TransactionalDSLContext;
+import de.catma.repository.db.mapper.IDFieldToIntegerMapper;
+import de.catma.repository.db.mapper.UserMapper;
 import de.catma.serialization.SerializationHandlerFactory;
 import de.catma.tag.Property;
 import de.catma.tag.PropertyDefinition;
@@ -76,9 +79,8 @@ import de.catma.tag.TagLibraryReference;
 import de.catma.tag.TagManager;
 import de.catma.tag.TagManager.TagManagerEvent;
 import de.catma.tag.TagsetDefinition;
+import de.catma.user.Role;
 import de.catma.user.User;
-import de.catma.util.CloseSafe;
-import de.catma.util.ContentInfoSet;
 import de.catma.util.IDGenerator;
 import de.catma.util.Pair;
 
@@ -89,10 +91,10 @@ public class DBRepository implements IndexedRepository {
 	
 	private String name;
 	
-	private DBCorpusHandler dbCorpusHandler;
-	private DBSourceDocumentHandler dbSourceDocumentHandler;
-	private DBTagLibraryHandler dbTagLibraryHandler;
-	private DBUserMarkupCollectionHandler dbUserMarkupCollectionHandler;
+	private CorpusHandler dbCorpusHandler;
+	private SourceDocumentHandler dbSourceDocumentHandler;
+	private TagLibraryHandler dbTagLibraryHandler;
+	private UserMarkupCollectionHandler dbUserMarkupCollectionHandler;
 	
 	private IndexerFactory indexerFactory;
 	private Indexer indexer;
@@ -101,8 +103,6 @@ public class DBRepository implements IndexedRepository {
 	private BackgroundServiceProvider backgroundServiceProvider;
 	private TagManager tagManager;
 
-	private SessionFactory sessionFactory;
-	
 	private DBUser currentUser;
 	private PropertyChangeSupport propertyChangeSupport;
 	private IDGenerator idGenerator;
@@ -119,6 +119,9 @@ public class DBRepository implements IndexedRepository {
 	private String url;
 
 	private String tempDir;
+	private String repoFolderPath;
+
+	private DataSource dataSource;
 
 
 	public DBRepository(
@@ -129,10 +132,11 @@ public class DBRepository implements IndexedRepository {
 			BackgroundServiceProvider backgroundServiceProvider,
 			IndexerFactory indexerFactory, 
 			SerializationHandlerFactory serializationHandlerFactory,
-			String url, String user, String pass, String tempDir) {
+			String url, String user, String pass, String tempDir) throws NamingException {
 		
 
 		this.name = name;
+		this.repoFolderPath = repoFolderPath;
 		this.authenticationRequired = authenticationRequired;
 		this.tagManager = tagManager;
 		this.backgroundServiceProvider = backgroundServiceProvider;
@@ -145,14 +149,6 @@ public class DBRepository implements IndexedRepository {
 		
 		this.propertyChangeSupport = new PropertyChangeSupport(this);
 		this.idGenerator = new IDGenerator();
-		
-		this.dbSourceDocumentHandler = 
-				new DBSourceDocumentHandler(this, repoFolderPath);
-		this.dbTagLibraryHandler = new DBTagLibraryHandler(this, idGenerator);
-		this.dbUserMarkupCollectionHandler = 
-				new DBUserMarkupCollectionHandler(this);
-		this.dbCorpusHandler = new DBCorpusHandler(this);
-
 	}
 	
 	private void initTagManagerListeners() {
@@ -164,20 +160,20 @@ public class DBRepository implements IndexedRepository {
 					return;
 				}
 				
-				if (evt.getOldValue() == null) {
+				if (evt.getOldValue() == null) { //insert
 					@SuppressWarnings("unchecked")
 					Pair<TagLibrary, TagsetDefinition> args = 
 							(Pair<TagLibrary, TagsetDefinition>)evt.getNewValue();
-					dbTagLibraryHandler.saveTagsetDefinition(
+					dbTagLibraryHandler.createTagsetDefinition(
 							args.getFirst(), args.getSecond());
 				}
-				else if (evt.getNewValue() == null) {
+				else if (evt.getNewValue() == null) { //delete
 					@SuppressWarnings("unchecked")
 					Pair<TagLibrary, TagsetDefinition> args = 
 							(Pair<TagLibrary, TagsetDefinition>)evt.getOldValue();
 					dbTagLibraryHandler.removeTagsetDefinition(args.getSecond());
 				}
-				else {
+				else { //update
 					dbTagLibraryHandler.updateTagsetDefinition(
 							(TagsetDefinition)evt.getNewValue());
 				}
@@ -200,7 +196,7 @@ public class DBRepository implements IndexedRepository {
 					@SuppressWarnings("unchecked")
 					Pair<TagsetDefinition, TagDefinition> args = 
 							(Pair<TagsetDefinition, TagDefinition>)evt.getNewValue();
-					dbTagLibraryHandler.saveTagDefinition(
+					dbTagLibraryHandler.createTagDefinition(
 							args.getFirst(), args.getSecond());
 				}
 				else if (evt.getNewValue() == null) {
@@ -279,110 +275,93 @@ public class DBRepository implements IndexedRepository {
 
 	public void open(Map<String, String> userIdentification) throws Exception {
 		initTagManagerListeners();
-		if (init.compareAndSet(false, true)) {
-			
-			Configuration hibernateConfig = new Configuration();
-			hibernateConfig.configure(
-					this.getClass().getPackage().getName().replace('.', '/') 
-					+ "/hibernate.cfg.xml");
-			
-			hibernateConfig.setProperty("hibernate.connection.username", user);
-			hibernateConfig.setProperty("hibernate.connection.url",url);
-			if ((pass != null) && (!pass.isEmpty())) {
-				hibernateConfig.setProperty("hibernate.connection.password", pass);
-			}
+		
+		Context context = new InitialContext();
 
-			ServiceRegistryBuilder serviceRegistryBuilder = new ServiceRegistryBuilder();
-			serviceRegistryBuilder.applySettings(hibernateConfig.getProperties());
-			ServiceRegistry serviceRegistry = 
-					serviceRegistryBuilder.buildServiceRegistry();
-			hibernateConfig.buildSessionFactory(serviceRegistry);
+		if (init.compareAndSet(false, true)) {
+			ComboPooledDataSource cpds = new ComboPooledDataSource();
 			
-			Context context = new InitialContext();
-			this.sessionFactory = (SessionFactory) context.lookup("catma");
+			cpds.setDriverClass( "org.gjt.mm.mysql.Driver" ); //loads the jdbc driver 
+			cpds.setJdbcUrl(url); 
+			cpds.setUser(user);
+			cpds.setPassword(pass); 
+			cpds.setIdleConnectionTestPeriod(10);
+			this.dataSource = cpds;
+			
+			context.bind("catmads", cpds);
 		}
 		else {
-			Context context = new InitialContext();
-			this.sessionFactory = (SessionFactory) context.lookup("catma");
+			this.dataSource = (DataSource) context.lookup("catmads");
 		}
 		
-		Map<String, Object> properties = new HashMap<String, Object>();
-		properties.put(IndexerPropertyKey.SessionFactory.name(), sessionFactory);
-		//TODO: fill up with all values from the properties file!
+		this.dbSourceDocumentHandler = 
+				new SourceDocumentHandler(this, repoFolderPath);
+		this.dbTagLibraryHandler = new TagLibraryHandler(this, idGenerator);
+		this.dbUserMarkupCollectionHandler = 
+				new UserMarkupCollectionHandler(this);
 		
-		indexer = indexerFactory.createIndexer(properties);
+		this.dbCorpusHandler = new CorpusHandler(this);
+
+		indexer = indexerFactory.createIndexer(Collections.<String, Object>emptyMap());
 		
-		Session session = sessionFactory.openSession();
+		DSLContext db = DSL.using(dataSource, SQLDialect.MYSQL);
 		
-		try {
-			loadCurrentUser(session, userIdentification);
-			loadContent(session);
-		}
-		finally {
-			CloseSafe.close(new CloseableSession(session));
-		}
+		loadCurrentUser(db, userIdentification);
+		loadContent(db);
 	}
 	
-	private void loadCurrentUser(Session session,
+	private void loadCurrentUser(DSLContext db,
 			Map<String, String> userIdentification) {
+
+		Record record = db
+		.select()
+		.from(USER)
+		.where(USER.IDENTIFIER.eq(userIdentification.get("user.ident")))
+		.fetchOne();
 		
-		Query query = session.createQuery(
-				"from " + DBUser.class.getSimpleName() +
-				" where identifier=:curIdentifier");
-		query.setString(
-				"curIdentifier", userIdentification.get("user.ident"));
-		
-		@SuppressWarnings("unchecked")
-		List<DBUser> result = query.list();
-		
-		if (result.isEmpty()) {
-			currentUser = createUser(session, userIdentification);
+		if (record == null) {
+			Record idRecord = db
+			.insertInto(
+				USER,
+					USER.IDENTIFIER,
+					USER.LOCKED,
+					USER.ROLE)
+			.values(
+				userIdentification.get("user.ident"),
+				(byte)0,
+				Role.STANDARD.getVal())
+			.returning(USER.USERID)
+			.fetchOne();
+			
+			currentUser = new DBUser(
+				idRecord.getValue(USER.USERID), 
+				userIdentification.get("user.ident"),
+				false,
+				Role.STANDARD);
 		}
 		else {
-			currentUser = result.get(0);
-			if (result.size() > 1) {
-				throw new IllegalStateException(
-						"the repository returned more than one user " +
-						"for the same identification");
-			}
+			currentUser = record.map(new UserMapper());
 		}
 	}
 
-	private DBUser createUser(Session session,
-			Map<String, String> userIdentification) {
-		DBUser user = new DBUser(userIdentification.get("user.ident"));
-		session.beginTransaction();
-		session.save(user);
-		session.getTransaction().commit();
-		return user;
-	}
-
-
-	private void loadContent(Session session) 
+	private void loadContent(DSLContext db) 
 			throws URISyntaxException, IOException, 
 			InstantiationException, IllegalAccessException {
-		dbSourceDocumentHandler.loadSourceDocuments(session);
-		dbTagLibraryHandler.loadTagLibraryReferences(session);
-		dbCorpusHandler.loadCorpora(session);
+		dbSourceDocumentHandler.loadSourceDocuments(db);
+		dbTagLibraryHandler.loadTagLibraryReferences(db);
+		dbCorpusHandler.loadCorpora(db);
 	}
 	
 	public void reload() throws IOException {
-		Session session = sessionFactory.openSession();
-		
 		try {
-			try {
-				dbSourceDocumentHandler.reloadSourceDocuments(session);
-				dbTagLibraryHandler.reloadTagLibraryReferences(session);
-				dbCorpusHandler.reloadCorpora(session);
-			}
-			catch (Exception e) {
-				throw new IOException(e);
-			}
+			DSLContext db = DSL.using(dataSource, SQLDialect.MYSQL);
+			dbSourceDocumentHandler.reloadSourceDocuments(db);
+			dbTagLibraryHandler.reloadTagLibraryReferences(db);
+			dbCorpusHandler.reloadCorpora(db);
 		}
-		finally {
-			CloseSafe.close(new CloseableSession(session));
+		catch (Exception e) {
+			throw new IOException(e);
 		}
-
 	}
 	
 	public void close() {
@@ -405,6 +384,7 @@ public class DBRepository implements IndexedRepository {
 		
 		indexer.close();
 
+		dataSource = null;
 	}
 	
 	
@@ -510,6 +490,9 @@ public class DBRepository implements IndexedRepository {
 				inputStream, sourceDocument);
 	}
 	
+	/* (non-Javadoc)
+	 * @see de.catma.document.repository.Repository#getUserMarkupCollection(de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionReference)
+	 */
 	public UserMarkupCollection getUserMarkupCollection(
 			UserMarkupCollectionReference userMarkupCollectionReference) throws IOException {
 		return getUserMarkupCollection(userMarkupCollectionReference, false);
@@ -671,10 +654,6 @@ public class DBRepository implements IndexedRepository {
 		return indexer;
 	}
 	
-	SessionFactory getSessionFactory() {
-		return sessionFactory;
-	}
-	
 	DBUser getCurrentUser() {
 		return currentUser;
 	}
@@ -695,11 +674,11 @@ public class DBRepository implements IndexedRepository {
 		return backgroundServiceProvider;
 	}
 	
-	DBTagLibraryHandler getDbTagLibraryHandler() {
+	TagLibraryHandler getDbTagLibraryHandler() {
 		return dbTagLibraryHandler;
 	}
 	
-	DBSourceDocumentHandler getDbSourceDocumentHandler() {
+	SourceDocumentHandler getDbSourceDocumentHandler() {
 		return dbSourceDocumentHandler;
 	}
 	
@@ -707,7 +686,7 @@ public class DBRepository implements IndexedRepository {
 		return tagManager;
 	}
 	
-	DBUserMarkupCollectionHandler getDbUserMarkupCollectionHandler() {
+	UserMarkupCollectionHandler getDbUserMarkupCollectionHandler() {
 		return dbUserMarkupCollectionHandler;
 	}
 	
@@ -715,81 +694,143 @@ public class DBRepository implements IndexedRepository {
 		return tempDir;
 	}
 	
-	//TODO: what happens if the corpus changes after sharing, do we share corpus changes?
-	//TODO: cache user object
-	public void share(Corpus corpus, String userIdentification, AccessMode accessMode) throws IOException {
+	public void share(
+			Corpus corpus, String userIdentification, AccessMode accessMode) 
+					throws IOException {
+		TransactionalDSLContext db = new TransactionalDSLContext(dataSource, SQLDialect.MYSQL);
 		
-		Session session = sessionFactory.openSession();
 		try {
-			DBUser dbUser = getUser(session, userIdentification); 
-			if (dbUser != null) {
-				DBCorpus dbCorpus = 
-					(DBCorpus) session.get(DBCorpus.class, Integer.valueOf(corpus.getId()));
+			Integer targetUserId = getUserId(db, userIdentification);
+			Integer corpusId = Integer.valueOf(corpus.getId());
+			
+			if (targetUserId != null) {
+				AccessMode corpusAccess = 
+						dbCorpusHandler.getCorpusAccess(
+							db, Integer.valueOf(corpus.getId()),
+							false);
 				
-				Query existQuery = session.createQuery(
-						"from " + DBUserCorpus.class.getSimpleName() + " where "
-						+ " dbUser = :user and dbCorpus = :corpus");
-				existQuery.setParameter("user", dbUser);
-				existQuery.setParameter("corpus", dbCorpus);
-				
-				DBUserCorpus dbUserCorpus = (DBUserCorpus) existQuery.uniqueResult();
-				
-				if (dbUserCorpus == null) {
-					dbUserCorpus = new DBUserCorpus(dbUser, dbCorpus, accessMode);
-					session.beginTransaction();
-					session.saveOrUpdate(dbUserCorpus);
+				if (accessMode.equals(AccessMode.WRITE)
+						&& (corpusAccess!= AccessMode.WRITE)) {
+					accessMode = corpusAccess;
 				}
 
+				Record record = db
+				.select(USER_CORPUS.USER_CORPUSID)
+				.from(USER_CORPUS)
+				.where(USER_CORPUS.USERID.eq(targetUserId))
+				.fetchOne();
+				
+				Integer userCorpusId = null;
+				
+				if (record != null) {
+					userCorpusId = record.map(
+						new IDFieldToIntegerMapper(USER_CORPUS.USER_CORPUSID));
+				}
+				
+				db.beginTransaction();
+				
+				if (userCorpusId == null) {
+					db
+					.insertInto(
+						USER_CORPUS,
+						USER_CORPUS.USERID,
+						USER_CORPUS.CORPUSID,
+						USER_CORPUS.ACCESSMODE,
+						USER_CORPUS.OWNER)
+					.values(
+						targetUserId,
+						corpusId,
+						accessMode.getNumericRepresentation(),
+						(byte)0)
+					.execute();
+				}
+				else if (accessMode.equals(AccessMode.WRITE)) {
+					db
+					.update(USER_CORPUS)
+					.set(USER_CORPUS.ACCESSMODE, accessMode.getNumericRepresentation())
+					.where(USER_CORPUS.USER_CORPUSID.eq(userCorpusId))
+					.execute();
+				}
+				for (SourceDocument sd : corpus.getSourceDocuments()) {
+					share(db, targetUserId, sd, userIdentification, accessMode);
+				}
+				
 				for (UserMarkupCollectionReference umcRef : 
 					corpus.getUserMarkupCollectionRefs()) {
-					share(session, umcRef, userIdentification, accessMode);
+					share(db, targetUserId, umcRef, userIdentification, accessMode);
 				}
-				
-				if (session.getTransaction().isActive()) {
-					session.getTransaction().commit();
-				}
+
+				db.commitTransaction();
 			}
 			else {
-				throw new IllegalArgumentException("User identification unknown!");
+				throw new UnknownUserException(userIdentification);
 			}
-
 		}
-		catch (Exception e) {
-			CloseSafe.close(new CloseableSession(session,true));
-			throw new IOException(e);
+		catch (Exception dae) {
+			db.rollbackTransaction();
+			db.close();
+			throw new IOException(dae);
+		}
+		finally {
+			if (db!=null) {
+				db.close();
+			}
 		}
 	}
 	
 	private void share(
-		Session session, SourceDocument sourceDocument, 
+		DSLContext db, Integer targetUserId, SourceDocument sourceDocument, 
 		String userIdentification, AccessMode accessMode) throws IOException {
 		
-		DBUser dbUser = getUser(session, userIdentification); 
-		if (dbUser != null) {
-			DBSourceDocument dbSourceDocument = 
-					dbSourceDocumentHandler.getDbSourceDocument(
-							session, sourceDocument.getID());
-			
-			Query existQuery = session.createQuery(
-					"from " + DBUserSourceDocument.class.getSimpleName() + " where "
-					+ " dbUser = :user and dbSourceDocument = :doc");
-			existQuery.setParameter("user", dbUser);
-			existQuery.setParameter("doc", dbSourceDocument);
-				
-			DBUserSourceDocument dbUserSourceDocument =
-					(DBUserSourceDocument) existQuery.uniqueResult(); 
-						
-			if (dbUserSourceDocument == null) {
-				dbUserSourceDocument = 
-					new DBUserSourceDocument(dbUser, dbSourceDocument, accessMode);
-				if (!session.getTransaction().isActive()) {
-					session.beginTransaction();
-				}
-				session.saveOrUpdate(dbUserSourceDocument);
-			}
+		Pair<Integer, AccessMode> sourceDocAccess = dbSourceDocumentHandler.getSourceDocumentAccess(
+				db, sourceDocument.getID(), false);
+		
+		AccessMode sourceDocAccessMode = sourceDocAccess.getSecond();
+		Integer sourceDocumentId = sourceDocAccess.getFirst();
+		
+		// allow at most the rights the sharing user has
+		if (accessMode.equals(AccessMode.WRITE) && 
+				(sourceDocAccessMode != AccessMode.WRITE)) {
+			accessMode = sourceDocAccessMode;
 		}
-		else {
-			throw new IllegalArgumentException("User identification unknown!");
+		
+		 Record record = db
+		.select(USER_SOURCEDOCUMENT.USER_SOURCEDOCUMENTID)
+		.from(USER_SOURCEDOCUMENT)
+		.where(USER_SOURCEDOCUMENT.USERID.eq(targetUserId))
+		.and(USER_SOURCEDOCUMENT.SOURCEDOCUMENTID.eq(sourceDocumentId))
+		.fetchOne();
+		
+		
+		Integer userSourceDocId = null;
+		
+		if (record != null) {
+			userSourceDocId = 
+				record.map(new IDFieldToIntegerMapper(
+						USER_SOURCEDOCUMENT.USER_SOURCEDOCUMENTID));
+		}
+		
+		if (userSourceDocId == null) {
+			db
+			.insertInto(
+				USER_SOURCEDOCUMENT,
+					USER_SOURCEDOCUMENT.USERID,
+					USER_SOURCEDOCUMENT.SOURCEDOCUMENTID,
+					USER_SOURCEDOCUMENT.ACCESSMODE,
+					USER_SOURCEDOCUMENT.OWNER)
+			.values(
+				targetUserId,
+				sourceDocumentId,
+				accessMode.getNumericRepresentation(),
+				(byte)0)
+			.execute();
+		}
+		else if (accessMode.equals(AccessMode.WRITE)) { // reshare only if this leads to more rights -> no revoke
+			db
+			.update(USER_SOURCEDOCUMENT)
+			.set(USER_SOURCEDOCUMENT.ACCESSMODE, accessMode.getNumericRepresentation())
+			.where(USER_SOURCEDOCUMENT.USER_SOURCEDOCUMENTID.eq(userSourceDocId))
+			.execute();
 		}
 	}
 	
@@ -797,66 +838,115 @@ public class DBRepository implements IndexedRepository {
 			SourceDocument sourceDocument, 
 			String userIdentification,
 			AccessMode accessMode) throws IOException {
-		Session session = sessionFactory.openSession();
-		try {
-			share(session, sourceDocument, userIdentification, accessMode);
-			session.getTransaction().commit();
-			CloseSafe.close(new CloseableSession(session));
+		DSLContext db = DSL.using(dataSource, SQLDialect.MYSQL);
+		Integer userId = getUserId(db, userIdentification); 
+		if (userId != null) {
+			share(db, userId, sourceDocument, userIdentification, accessMode);
 		}
-		catch (Exception e) {
-			CloseSafe.close(new CloseableSession(session,true));
-			throw new IOException(e);
+		else {
+			throw new UnknownUserException(userIdentification);
 		}
 	}
 	
+	private Integer getUserId(DSLContext db, String userIdentification) {
+		Record idRecord = db 
+		.select(USER.USERID)
+		.from(USER)
+		.where(USER.IDENTIFIER.equalIgnoreCase(userIdentification))
+		.fetchOne();
+		
+		return (idRecord==null)?null:idRecord.getValue(USER.USERID);
+	}
+
 	public void share(UserMarkupCollectionReference userMarkupCollectionRef, 
 			String userIdentification, AccessMode accessMode) throws IOException {
-		Session session = sessionFactory.openSession();
-		try {
-			share(session, userMarkupCollectionRef, userIdentification, accessMode);
-			CloseSafe.close(new CloseableSession(session));
+		TransactionalDSLContext db = new TransactionalDSLContext(dataSource, SQLDialect.MYSQL);
+		
+		Integer userId = getUserId(db, userIdentification);
+		if (userId != null) {
+			try {
+				db.beginTransaction();
+				share(
+					db, userId, 
+					userMarkupCollectionRef, userIdentification, accessMode);
+				db.commitTransaction();
+			}
+			catch (Exception dae) {
+				db.rollbackTransaction();
+				db.close();
+				throw new IOException(dae);
+			}
+			finally {
+				if (db!=null) {
+					db.close();
+				}
+			}
 		}
-		catch (Exception e) {
-			CloseSafe.close(new CloseableSession(session,true));
-			throw new IOException(e);
+		else {
+			throw new UnknownUserException(userIdentification);
 		}
 	}
 	
 	private void share(
-			Session session, 
+			DSLContext db, Integer targetUserId, 
 			UserMarkupCollectionReference userMarkupCollectionRef, 
 			String userIdentification, AccessMode accessMode) throws IOException {
+		
+		AccessMode currentAccessMode = 
+			dbUserMarkupCollectionHandler.getUserMarkupCollectionAccessMode(
+				db, Integer.valueOf(userMarkupCollectionRef.getId()), false);
+				
+		if (accessMode.equals(AccessMode.WRITE)  
+			&& !currentAccessMode.equals(AccessMode.WRITE)) {
+			accessMode = AccessMode.READ;
+		}
 		
 		SourceDocument sourceDocument = 
 				getSourceDocument(new UserMarkupCollectionReference(
 						userMarkupCollectionRef.getId(), 
 						userMarkupCollectionRef.getContentInfoSet()));
-		share(session, sourceDocument, userIdentification, accessMode);
-		DBUser dbUser = getUser(session, userIdentification); 
-		if (dbUser != null) {
-			DBUserMarkupCollection dbUserMarkupCollection =
-					(DBUserMarkupCollection) session.get(
-							DBUserMarkupCollection.class,
-							Integer.valueOf(userMarkupCollectionRef.getId()));
-			Query existQuery = session.createQuery(
-				"from " + DBUserUserMarkupCollection.class.getSimpleName() + " where "
-				+ " dbUser = :user and dbUserMarkupCollection = :umc");
-			existQuery.setParameter("user", dbUser);
-			existQuery.setParameter("umc", dbUserMarkupCollection);
-			
-			DBUserUserMarkupCollection dbUserUserMarkupCollection = 
-					(DBUserUserMarkupCollection) existQuery.uniqueResult();
-			if (dbUserUserMarkupCollection == null) {
-				dbUserUserMarkupCollection = 
-						new DBUserUserMarkupCollection(
-								dbUser, dbUserMarkupCollection, accessMode);
-				if (!session.getTransaction().isActive()) {
-					session.beginTransaction();
-				}
-				session.saveOrUpdate(dbUserUserMarkupCollection);
-				session.getTransaction().commit();
-				
-			}
+		
+		share(db, targetUserId, sourceDocument, userIdentification, accessMode);
+		
+		Integer userMarkupCollectionId = 
+				Integer.valueOf(userMarkupCollectionRef.getId());
+		
+		Record record = db
+		.select(USER_USERMARKUPCOLLECTION.USER_USERMARKUPCOLLECTIOID)
+		.from(USER_USERMARKUPCOLLECTION)
+		.where(USER_USERMARKUPCOLLECTION.USERID.eq(targetUserId))
+		.and(USER_USERMARKUPCOLLECTION.USERMARKUPCOLLECTIONID.eq(userMarkupCollectionId))
+		.fetchOne();
+		
+		Integer userUmcId = null;
+		
+		if (record != null) {
+			userUmcId = record.map(
+				new IDFieldToIntegerMapper(
+						USER_USERMARKUPCOLLECTION.USER_USERMARKUPCOLLECTIOID));
+		}
+		
+		if (userUmcId == null) {
+			db
+			.insertInto(
+				USER_USERMARKUPCOLLECTION,
+					USER_USERMARKUPCOLLECTION.USERID,
+					USER_USERMARKUPCOLLECTION.USERMARKUPCOLLECTIONID,
+					USER_USERMARKUPCOLLECTION.ACCESSMODE,
+					USER_USERMARKUPCOLLECTION.OWNER)
+			.values(
+				targetUserId,
+				userMarkupCollectionId,
+				accessMode.getNumericRepresentation(),
+				(byte)0)
+			.execute();
+		}
+		else if (accessMode.equals(AccessMode.WRITE)) {
+			db
+			.update(USER_USERMARKUPCOLLECTION)
+			.set(USER_USERMARKUPCOLLECTION.ACCESSMODE, accessMode.getNumericRepresentation())
+			.where(USER_USERMARKUPCOLLECTION.USER_USERMARKUPCOLLECTIOID.eq(userUmcId))
+			.execute();
 		}
 	}
 
@@ -864,49 +954,63 @@ public class DBRepository implements IndexedRepository {
 			TagLibraryReference tagLibrary, 
 			String userIdentification, AccessMode accessMode) throws IOException {
 		
-		Session session = sessionFactory.openSession();
-		try {
+		DSLContext db = DSL.using(dataSource, SQLDialect.MYSQL);
+		Integer tagLibraryId = Integer.valueOf(tagLibrary.getId());
+		
+		Integer targetUserId = getUserId(db, userIdentification);
+		if (targetUserId != null) {
 			
-			DBUser dbUser = getUser(session, userIdentification); 
-			if (dbUser != null) {
-				DBTagLibrary dbTagLibrary =
-						(DBTagLibrary) session.get(
-								DBTagLibrary.class,
-								Integer.valueOf(tagLibrary.getId()));
-				
-				Query existQuery = session.createQuery(
-						"from " + DBUserTagLibrary.class.getSimpleName() + " where "
-						+ " dbUser = :user and dbTagLibrary = :lib");
-				existQuery.setParameter("user", dbUser);
-				existQuery.setParameter("lib", dbTagLibrary);
-					
-				DBUserTagLibrary dbUserTagLibrary =
-						(DBUserTagLibrary) existQuery.uniqueResult(); 
-							
-				if (dbUserTagLibrary == null) {
-					dbUserTagLibrary = 
-						new DBUserTagLibrary(dbUser, dbTagLibrary, accessMode);
-					session.beginTransaction();
-					session.saveOrUpdate(dbUserTagLibrary);
-					session.getTransaction().commit();
-				}
+			AccessMode libAccess = 
+					dbTagLibraryHandler.getLibraryAccess(
+							db, tagLibraryId, false);
+			
+			if (accessMode.equals(AccessMode.WRITE) && libAccess != AccessMode.WRITE) {
+				accessMode = libAccess;
 			}
-			else {
-				throw new IllegalArgumentException("User identification unknown!");
+			
+			Record record = db
+			.select(USER_TAGLIBRARY.USER_TAGLIBRARYID)
+			.from(USER_TAGLIBRARY)
+			.where(USER_TAGLIBRARY.USERID.eq(targetUserId))
+			.and(USER_TAGLIBRARY.TAGLIBRARYID.eq(tagLibraryId))
+			.fetchOne();
+			
+			Integer userTagLibId = null;
+			if (record != null) {
+				userTagLibId = record.map(
+					new IDFieldToIntegerMapper(USER_TAGLIBRARY.USER_TAGLIBRARYID));
 			}
-			CloseSafe.close(new CloseableSession(session));
-		}
-		catch (Exception e) {
-			CloseSafe.close(new CloseableSession(session,true));
-			throw new IOException(e);
+			
+			if (userTagLibId == null) {
+				db
+				.insertInto(
+					USER_TAGLIBRARY,
+						USER_TAGLIBRARY.USERID,
+						USER_TAGLIBRARY.TAGLIBRARYID,
+						USER_TAGLIBRARY.ACCESSMODE,
+						USER_TAGLIBRARY.OWNER)
+				.values(
+					targetUserId,
+					tagLibraryId,
+					accessMode.getNumericRepresentation(),
+					(byte)0)
+				.execute();
+			}
+			else if (accessMode.equals(AccessMode.WRITE)){
+				db
+				.update(USER_TAGLIBRARY)
+				.set(USER_TAGLIBRARY.ACCESSMODE, accessMode.getNumericRepresentation())
+				.where(USER_TAGLIBRARY.USER_TAGLIBRARYID.eq(userTagLibId))
+				.execute();
+			}
+		}				
+		else {
+			throw new UnknownUserException(userIdentification);
 		}
 	}
 
-	private DBUser getUser(Session session, String userIdentification) {
-		Query query = session.createQuery(
-			"from " + DBUser.class.getSimpleName() + " where identifier = :userIdent");
-		query.setParameter("userIdent", userIdentification);
-		
-		return (DBUser) query.uniqueResult();
+	public File getFile(SourceDocument sourceDocument) {
+		return new File(
+			sourceDocument.getSourceContentHandler().getSourceDocumentInfo().getTechInfoSet().getURI());
 	}
 }

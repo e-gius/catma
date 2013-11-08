@@ -22,11 +22,13 @@ import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Collection;
-import java.util.Collections;
 
 import org.vaadin.dialogs.ConfirmDialog;
 import org.vaadin.teemu.wizards.event.WizardCancelledEvent;
@@ -67,17 +69,20 @@ import de.catma.CatmaApplication;
 import de.catma.backgroundservice.DefaultProgressCallable;
 import de.catma.backgroundservice.ExecutionListener;
 import de.catma.document.Corpus;
-import de.catma.document.repository.AccessMode;
 import de.catma.document.repository.Repository;
 import de.catma.document.repository.Repository.RepositoryChangeEvent;
+import de.catma.document.repository.UnknownUserException;
+import de.catma.document.source.ContentInfoSet;
 import de.catma.document.source.SourceDocument;
 import de.catma.document.source.contenthandler.BOMFilterInputStream;
+import de.catma.document.source.contenthandler.SourceContentHandler;
 import de.catma.document.standoffmarkup.MarkupCollectionReference;
 import de.catma.document.standoffmarkup.staticmarkup.StaticMarkupCollectionReference;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollection;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionReference;
 import de.catma.indexer.IndexedRepository;
 import de.catma.indexer.Indexer;
+import de.catma.indexer.TagsetDefinitionUpdateLog;
 import de.catma.serialization.tei.TeiUserMarkupCollectionSerializationHandler;
 import de.catma.tag.PropertyDefinition;
 import de.catma.tag.PropertyPossibleValueList;
@@ -87,14 +92,16 @@ import de.catma.tag.TagLibraryReference;
 import de.catma.tag.TagsetDefinition;
 import de.catma.tag.Version;
 import de.catma.ui.analyzer.AnalyzerProvider;
+import de.catma.ui.dialog.FormDialog;
 import de.catma.ui.dialog.SaveCancelListener;
 import de.catma.ui.dialog.SingleValueDialog;
 import de.catma.ui.dialog.UploadDialog;
+import de.catma.ui.repository.sharing.SharingOptions;
+import de.catma.ui.repository.sharing.SharingOptionsFieldFactory;
 import de.catma.ui.repository.wizard.AddSourceDocWizardFactory;
 import de.catma.ui.repository.wizard.AddSourceDocWizardResult;
 import de.catma.util.CloseSafe;
 import de.catma.util.ColorConverter;
-import de.catma.util.ContentInfoSet;
 import de.catma.util.IDGenerator;
 import de.catma.util.Pair;
 
@@ -152,7 +159,9 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 						(SourceDocument)evt.getOldValue());
 				}
 				else { //update
-					documentsTree.requestRepaint();
+					removeSourceDocumentFromTree((SourceDocument) evt.getNewValue()); //newValue intended
+					addSourceDocumentToTree((SourceDocument) evt.getNewValue());
+					documentsContainer.sort(new Object[] {SORTCAP_PROP}, new boolean[] { true });
 				}
 			}
 		};
@@ -284,10 +293,13 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 		miMoreDocumentActions.addItem("Export Document", new Command() {
 			
 			public void menuSelected(MenuItem selectedItem) {
-				getWindow().showNotification(
-					"Information", "Not implemented yet!", 
-					Notification.TYPE_TRAY_NOTIFICATION);
-				//TODO: implement
+				handleSourceDocumentExportRequest();
+			}
+		});
+		miMoreDocumentActions.addItem("Export Document as UTF-8 plain text", new Command() {
+			
+			public void menuSelected(MenuItem selectedItem) {
+				handleSourceDocumentExportUTF8Request();
 			}
 		});
 		
@@ -327,7 +339,15 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 			public void menuSelected(MenuItem selectedItem) {
 				
 				Object value = documentsTree.getValue();
-				handleUserMarkupCollectionExportRequest(value);
+				handleUserMarkupCollectionExportRequest(value, false);
+			}
+		});
+
+		miMoreDocumentActions.addItem("Export User Markup Collection with text", new Command() {
+			public void menuSelected(MenuItem selectedItem) {
+				
+				Object value = documentsTree.getValue();
+				handleUserMarkupCollectionExportRequest(value, true);
 			}
 		});
 		
@@ -431,39 +451,154 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 		});
 	}
 	
+	private void handleSourceDocumentExportUTF8Request() {
+		Object value = documentsTree.getValue();
+		if ((value == null) || !(value instanceof SourceDocument)) {
+			 getWindow().showNotification(
+                    "Information",
+                    "Please select a Source Document first",
+                    Notification.TYPE_TRAY_NOTIFICATION);
+		}
+		else{
+			final SourceDocument sourceDocument = (SourceDocument)value;
+			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+//			OutputStreamWriter writer = new OutputStreamWriter(bos, "UTF-8");
+			
+			try {
+				bos.write(sourceDocument.getContent().getBytes(Charset.forName("UTF8")));
+			
+				final ByteArrayInputStream bis = 
+						new ByteArrayInputStream(bos.toByteArray());
+				
+				getWindow().open(new FileResource(null, getApplication()) {
+					public com.vaadin.terminal.DownloadStream getStream() {
+						DownloadStream ds = new DownloadStream(bis, 
+								getMIMEType(), getFilename());
+						ds.setParameter(
+								"Content-Disposition", 
+								"attachment; filename="
+										+ getFilename());
+						ds.setCacheTime(0);
+						return ds;
+					};
+					public String getMIMEType() {
+						return "text/plain;charset=utf-8";
+					};
+					
+					public String getFilename() {
+						SourceContentHandler sourceContentHandler = 
+								sourceDocument.getSourceContentHandler();
+						String title = 
+								sourceContentHandler.getSourceDocumentInfo()
+									.getContentInfoSet().getTitle();
+						if (title!=null) {
+							title = title.replaceAll("\\s", "_");
+						}
+						return sourceDocument.getID() 
+							+ (((title==null)||title.isEmpty())?"":("_"+title)) +
+							".txt";
+					};
+				},
+				"_blank");
+				
+			} catch (IOException e) {
+				((CatmaApplication)getApplication()).showAndLogError("error exporting source document as plain text", e);
+			}
+			
+		}		
+	}
+
+	
+	private void handleSourceDocumentExportRequest() {
+		Object value = documentsTree.getValue();
+		if ((value == null) || !(value instanceof SourceDocument)) {
+			 getWindow().showNotification(
+                    "Information",
+                    "Please select a Source Document first",
+                    Notification.TYPE_TRAY_NOTIFICATION);
+		}
+		else{
+			final SourceDocument sourceDocument = (SourceDocument)value;
+			
+			final File file = repository.getFile(sourceDocument);
+			
+			getWindow().open(new FileResource(null, getApplication()) {
+				public com.vaadin.terminal.DownloadStream getStream() {
+					
+					try {
+						DownloadStream  ds = new DownloadStream(
+							new FileInputStream(file), 
+							getMIMEType(), getFilename());
+						ds.setParameter(
+								"Content-Disposition", 
+								"attachment; filename="
+										+ getFilename());
+						ds.setCacheTime(0);
+						return ds;
+					} catch (FileNotFoundException e) {
+						throw new RuntimeException(e);
+					}
+				};
+				public String getMIMEType() {
+					return sourceDocument.getSourceContentHandler().getSourceDocumentInfo().getTechInfoSet().getMimeType();
+				};
+				
+				public String getFilename() {
+					SourceContentHandler sourceContentHandler = 
+							sourceDocument.getSourceContentHandler();
+					String title = 
+							sourceContentHandler.getSourceDocumentInfo()
+								.getContentInfoSet().getTitle();
+					if (title!=null) {
+						title = title.replaceAll("\\s", "_");
+					}
+					return sourceDocument.getID() 
+						+ (((title==null)||title.isEmpty())?"":("_"+title)) +
+						"." + sourceContentHandler.getSourceDocumentInfo().getTechInfoSet().getFileType().name().toLowerCase();
+				};
+			},
+			"_blank");
+			
+		}
+	}
+
 	private void handleShareUmcRequest() {
 		Object selValue = documentsTree.getValue();
 		if ((selValue != null) 
 				&& (selValue instanceof UserMarkupCollectionReference)) {
 			final UserMarkupCollectionReference userMarkupCollectionReference =
 					(UserMarkupCollectionReference) selValue;
-			final String userIdentificationPropertyName = "Share with (email)";
-			
-			SingleValueDialog singleValueDialog = new SingleValueDialog();
-			
-			singleValueDialog.getSingleValue(
-					getApplication().getMainWindow(),
-					"Please enter the user name of the person you want to share with",
-					"You have to enter a name!",
-					new SaveCancelListener<PropertysetItem>() {
-				public void cancelPressed() {}
-				public void savePressed(
-						PropertysetItem propertysetItem) {
-					Property property = 
-							propertysetItem.getItemProperty(
-									userIdentificationPropertyName);
-					String userIdent = (String)property.getValue();
-					try {
-						repository.share(
-								userMarkupCollectionReference, 
-								userIdent, AccessMode.READ);
-					} catch (IOException e) {
-						((CatmaApplication)getApplication()).showAndLogError(
-							"Error sharing this document!", e);
-					}
-				}
-			}, userIdentificationPropertyName);
 
+			SharingOptions sharingOptions = new SharingOptions();
+			
+			FormDialog<SharingOptions> sharingOptionsDlg = new FormDialog<SharingOptions>(
+				"Please enter the person you want to share with", 
+				new BeanItem<SharingOptions>(sharingOptions),
+				new SharingOptionsFieldFactory(), 
+				new SaveCancelListener<SharingOptions>() {
+					public void cancelPressed() {}
+					public void savePressed(SharingOptions result) {
+						try {
+							repository.share(
+									userMarkupCollectionReference, 
+									result.getUserIdentification(), 
+									result.getAccessMode());
+						} catch (IOException e) {
+							if (e.getCause() instanceof UnknownUserException) {
+								getWindow().showNotification(
+										"Sharing failed!", e.getCause().getMessage(), 
+										Notification.TYPE_WARNING_MESSAGE);
+							}
+							else {
+								((CatmaApplication)getApplication()).showAndLogError(
+									"Error sharing this corpus!", e);
+							}
+						}
+					}
+				});
+			sharingOptionsDlg.setVisibleItemProperties(
+					new Object[] {"userIdentification", "accessMode"});
+			sharingOptionsDlg.show(getApplication().getMainWindow());
 		}
 		else {
 			getWindow().showNotification(
@@ -482,32 +617,36 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 		}
 		else{
 			final SourceDocument sourceDocument = (SourceDocument)value;
-			final String userIdentificationPropertyName = "Share with (email)";
+			SharingOptions sharingOptions = new SharingOptions();
 			
-			SingleValueDialog singleValueDialog = new SingleValueDialog();
-			
-			singleValueDialog.getSingleValue(
-					getApplication().getMainWindow(),
-					"Please enter the user name of the person you want to share with",
-					"You have to enter a name!",
-					new SaveCancelListener<PropertysetItem>() {
-				public void cancelPressed() {}
-				public void savePressed(
-						PropertysetItem propertysetItem) {
-					Property property = 
-							propertysetItem.getItemProperty(
-									userIdentificationPropertyName);
-					String userIdent = (String)property.getValue();
-					try {
-						repository.share(
-								sourceDocument, userIdent, AccessMode.READ);
-					} catch (IOException e) {
-						((CatmaApplication)getApplication()).showAndLogError(
-							"Error sharing this document!", e);
+			FormDialog<SharingOptions> sharingOptionsDlg = new FormDialog<SharingOptions>(
+				"Please enter the person you want to share with", 
+				new BeanItem<SharingOptions>(sharingOptions),
+				new SharingOptionsFieldFactory(), 
+				new SaveCancelListener<SharingOptions>() {
+					public void cancelPressed() {}
+					public void savePressed(SharingOptions result) {
+						try {
+							repository.share(
+									sourceDocument, 
+									result.getUserIdentification(), 
+									result.getAccessMode());
+						} catch (IOException e) {
+							if (e.getCause() instanceof UnknownUserException) {
+								getWindow().showNotification(
+										"Sharing failed!", e.getCause().getMessage(), 
+										Notification.TYPE_WARNING_MESSAGE);
+							}
+							else {
+								((CatmaApplication)getApplication()).showAndLogError(
+									"Error sharing this corpus!", e);
+							}
+						}
 					}
-				}
-			}, userIdentificationPropertyName);
-
+				});
+			sharingOptionsDlg.setVisibleItemProperties(
+					new Object[] {"userIdentification", "accessMode"});
+			sharingOptionsDlg.show(getApplication().getMainWindow());
 		}
 		
 	}
@@ -621,11 +760,8 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 				for (TagsetDefinition tagsetDef : umc.getTagLibrary()) {
 					indexer.reindex(
 						tagsetDef, 
-						Collections.<byte[]>emptySet(), 
-						umc, 
-						repository.getSourceDocument(
-							new UserMarkupCollectionReference(
-								umc.getId(), umc.getContentInfoSet())).getID());
+						new TagsetDefinitionUpdateLog(), 
+						umc);
 				}
 				getWindow().showNotification(
 						"Information", "Reindexing finished!", 
@@ -638,17 +774,17 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 		}
 	}
 
-	private void handleUserMarkupCollectionExportRequest(Object value) {
+	private void handleUserMarkupCollectionExportRequest(Object value, boolean withText) {
 		if ((value != null) && (value instanceof UserMarkupCollectionReference)) {
 			final UserMarkupCollectionReference umcRef = 
 					(UserMarkupCollectionReference)value;
 			final SourceDocument sd = 
 					(SourceDocument)documentsTree.getParent(
 							documentsTree.getParent(value));
-			
+
 			TeiUserMarkupCollectionSerializationHandler handler =
 					new TeiUserMarkupCollectionSerializationHandler(
-							repository.getTagManager());
+							repository.getTagManager(), withText);
 			ByteArrayOutputStream teiDocOut = new ByteArrayOutputStream();
 			try {
 				handler.serialize(
@@ -1198,6 +1334,15 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 				btOpenDocument.setEnabled(false);
 			}
 		}
+		else {
+			contentInfoForm.setEnabled(false);
+			contentInfoForm.setItemDataSource(
+					new BeanItem<ContentInfoSet>(emptyContentInfoSet));
+			contentInfoForm.setVisibleItemProperties(new String[] {
+					"title", "author", "description", "publisher"
+			});
+			btOpenDocument.setEnabled(false);
+		}
 		contentInfoForm.setReadOnly(true);
 	}
 
@@ -1219,6 +1364,9 @@ public class SourceDocumentPanel extends HorizontalSplitPanel
 			documentsContainer.addContainerFilter(sdf);
 			if(documentsContainer.size() > 0) {
 				documentsTree.setValue(documentsContainer.getIdByIndex(0));
+			}
+			else {
+				documentsTree.setValue(null);
 			}
 		}
 	}

@@ -77,7 +77,7 @@ adjacencyQuery returns [Query query]
 term returns [Query query]
 	:	phrase { $query = $phrase.query; }
 		| selector { $query = $selector.query; }
-		| subQuery=query { $query = $subQuery.query; }
+		| subQuery=query { $query = new SubQuery($subQuery.query); }
 	;
 	catch[RecognitionException e] {throw e;}
 	
@@ -112,7 +112,8 @@ tagQuery returns [Query query]
 	catch[RecognitionException e] {throw e;}
 
 propertyQuery returns [Query query]
-	:	^(ND_PROPERTY property=phrase (value=phrase)?) { $query = new PropertyQuery($property.query, $value.query); }
+	:	^(ND_PROPERTY property=phrase (value=phrase)? tagMatchMode=TAG_MATCH_MODE?) { $query = new PropertyQuery(null, $property.query, $value.query, $tagMatchMode.text); }
+	|	^(ND_TAGPROPERTY tag=phrase property=phrase (value=phrase)? tagMatchMode=TAG_MATCH_MODE?) { $query = new PropertyQuery($tag.query, $property.query, $value.query, $tagMatchMode.text); }
 	;
 	catch[RecognitionException e] {throw e;}
 

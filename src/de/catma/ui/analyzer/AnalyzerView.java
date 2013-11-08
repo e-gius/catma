@@ -165,8 +165,12 @@ implements ClosableTab, TabComponent, GroupedQueryResultSelectionListener, Relev
 					}
 				}
 				else { //update
+					String oldId = (String) evt.getOldValue();
+					if (relevantSourceDocumentIDs.contains(oldId)) {
+						removeSourceDocumentFromTree((SourceDocument) evt.getNewValue());
+						addSourceDocument((SourceDocument) evt.getNewValue());
+					}
 					tagsetDefinitionDictionary.clear();
-					documentsTree.requestRepaint();
 				}
 			}
 		};
@@ -362,7 +366,9 @@ implements ClosableTab, TabComponent, GroupedQueryResultSelectionListener, Relev
 	private void executeSearch() {
 
 		QueryOptions queryOptions = new QueryOptions(
-				relevantSourceDocumentIDs,
+				relevantSourceDocumentIDs.isEmpty()?
+						getSourceDocumentIDs(repository.getSourceDocuments()):
+							relevantSourceDocumentIDs,
 				relevantUserMarkupCollIDs,
 				relevantStaticMarkupCollIDs,
 				indexInfoSet.getUnseparableCharacterSequences(),
@@ -417,6 +423,15 @@ implements ClosableTab, TabComponent, GroupedQueryResultSelectionListener, Relev
 		});
 	}
 	
+	private List<String> getSourceDocumentIDs(
+			Collection<SourceDocument> sourceDocuments) {
+		ArrayList<String> result = new ArrayList<String>();
+		for (SourceDocument sd : sourceDocuments) {
+			result.add(sd.getID());
+		}
+		return result;
+	}
+
 	public void resultsSelected(GroupedQueryResultSet groupedQueryResultSet) {
 		try {
 			handleDistributionChartRequest(groupedQueryResultSet);

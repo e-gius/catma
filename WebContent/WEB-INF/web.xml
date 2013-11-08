@@ -5,7 +5,7 @@
 		<description>
 		Vaadin production mode</description>
 		<param-name>productionMode</param-name>
-		<param-value>false</param-value>
+		<param-value>true</param-value>
 	</context-param>
 	<session-config>
     	<session-timeout>120</session-timeout>
@@ -30,6 +30,10 @@
 	<servlet-mapping>
 		<servlet-name>Clea</servlet-name>
 		<url-pattern>/*</url-pattern>
+	</servlet-mapping>
+	<servlet-mapping>
+    	<servlet-name>default</servlet-name>
+    	<url-pattern>/manual/*</url-pattern>
 	</servlet-mapping>
 	<welcome-file-list>
 		<welcome-file>index.html</welcome-file>

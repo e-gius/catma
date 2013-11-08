@@ -19,12 +19,16 @@
 package de.catma.ui.analyzer;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
+import com.vaadin.addon.tableexport.ExcelExport;
 import com.vaadin.data.Property.ValueChangeEvent;
 import com.vaadin.data.Property.ValueChangeListener;
 import com.vaadin.data.util.HierarchicalContainer;
 import com.vaadin.terminal.ClassResource;
+import com.vaadin.terminal.ThemeResource;
 import com.vaadin.ui.AbstractComponent;
 import com.vaadin.ui.Alignment;
 import com.vaadin.ui.Button;
@@ -40,11 +44,15 @@ import com.vaadin.ui.Window.Notification;
 
 import de.catma.CatmaApplication;
 import de.catma.document.repository.Repository;
+import de.catma.document.source.KeywordInContext;
 import de.catma.document.source.SourceDocument;
+import de.catma.indexer.KwicProvider;
 import de.catma.queryengine.result.AccumulativeGroupedQueryResult;
 import de.catma.queryengine.result.GroupedQueryResult;
 import de.catma.queryengine.result.GroupedQueryResultSet;
 import de.catma.queryengine.result.QueryResult;
+import de.catma.queryengine.result.QueryResultRow;
+import de.catma.ui.HierarchicalExcelExport;
 import de.catma.ui.data.util.PropertyDependentItemSorter;
 import de.catma.ui.data.util.PropertyToTrimmedStringCIComparator;
 
@@ -66,6 +74,9 @@ public class PhraseResultPanel extends VerticalLayout {
 	private RelevantUserMarkupCollectionProvider relevantUserMarkupCollectionProvider;
 	private Button btSelectAll;
 	private Button btDeselectAll;
+	private Button btDoubleTree;
+	private Button btExcelExport;
+	private Button btKwicExcelExport;
 
 	public PhraseResultPanel(
 			Repository repository, 
@@ -87,6 +98,41 @@ public class PhraseResultPanel extends VerticalLayout {
 	}
 
 	private void initActions() {
+		btDoubleTree.addListener(new ClickListener() {
+			
+			public void buttonClick(ClickEvent event) {
+				Set<?> selection = (Set<?>) resultTable.getValue();
+				
+				try {
+					if (selection.size() == 1) {
+						GroupedQueryResult result = 
+								extractGroupedQueryResult(selection.iterator().next());
+						List<KeywordInContext> kwics = new ArrayList<KeywordInContext>();
+						for (QueryResultRow row : result) {
+						
+							SourceDocument sourceDocument = 
+									repository.getSourceDocument(row.getSourceDocumentId());
+								
+							KwicProvider kwicProvider = new KwicProvider(sourceDocument);
+							KeywordInContext kwic = kwicProvider.getKwic(row.getRange(), 5);
+							kwics.add(kwic);
+						}	
+						((CatmaApplication)getApplication()).addDoubleTree(kwics);
+					}		
+					else {
+						getWindow().showNotification(
+							"Information", 
+							"Please select exactly one phrase!", 
+							Notification.TYPE_TRAY_NOTIFICATION);
+					}
+				} catch (IOException e) {
+					((CatmaApplication)getApplication()).showAndLogError(
+							"error while preparing kwic in doubletree visualization", e);
+				}
+				
+			}
+		});
+		
 		btDist.addListener(new ClickListener() {
 			
 			public void buttonClick(ClickEvent event) {
@@ -131,6 +177,28 @@ public class PhraseResultPanel extends VerticalLayout {
 			
 			public void buttonClick(ClickEvent event) {
 				selectAllForKwic(false);
+			}
+		});
+		
+		btKwicExcelExport.addListener(new ClickListener() {
+			
+			public void buttonClick(ClickEvent event) {
+            	ExcelExport excelExport = 
+            			new HierarchicalExcelExport(kwicPanel.getKwicTable(), 
+            					"CATMA Query Result Kwic");
+                excelExport.excludeCollapsedColumns();
+                excelExport.setReportTitle("CATMA Query Result Kwic");
+                excelExport.export();
+			}
+		});
+
+		btExcelExport.addListener(new ClickListener() {
+			
+			public void buttonClick(ClickEvent event) {
+            	ExcelExport excelExport = new HierarchicalExcelExport(resultTable, "CATMA Query Result");
+                excelExport.excludeCollapsedColumns();
+                excelExport.setReportTitle("CATMA Query Result");
+                excelExport.export();
 			}
 		});
 	}
@@ -202,7 +270,25 @@ public class PhraseResultPanel extends VerticalLayout {
 		btDist.setIcon(new ClassResource(
 				"ui/analyzer/resources/chart.gif", 
 				getApplication()));
+		btDist.setDescription(
+			"Show selected phrases as a distribution trend in a " +
+			"chart like visualization.");
+		
 		buttonPanel.addComponent(btDist);
+		
+		btDoubleTree = new Button();
+		btDoubleTree.setIcon(new ClassResource(
+				"ui/analyzer/resources/doubletree.gif", 
+				getApplication()));
+		btDoubleTree.setDescription(
+			"Show a selected phrase with a doubletree kwic visualization.");
+		
+		buttonPanel.addComponent(btDoubleTree);
+		
+		btExcelExport = new Button();
+		btExcelExport.setIcon(new ThemeResource("../images/table-excel.png"));
+		btExcelExport.setDescription("Export all Query result data as an Excel spreadsheet.");
+		buttonPanel.addComponent(btExcelExport);
 		
 		btSelectAll = new Button("Select all for Kwic");
 		
@@ -224,6 +310,16 @@ public class PhraseResultPanel extends VerticalLayout {
 		rightComponent.addComponent(kwicPanel);
 		rightComponent.setExpandRatio(kwicPanel, 1f);
 
+		HorizontalLayout kwicButtonPanel = new HorizontalLayout();
+		kwicButtonPanel.setSpacing(true);
+		kwicButtonPanel.setWidth("100%");
+		
+		btKwicExcelExport = new Button();
+		btKwicExcelExport.setIcon(new ThemeResource("../images/table-excel.png"));
+		btKwicExcelExport.setDescription(
+				"Export all Query result data as an Excel spreadsheet.");
+		kwicButtonPanel.addComponent(btKwicExcelExport);
+
 		Label helpLabel = new Label();
 		helpLabel.setIcon(new ClassResource(
 				"ui/resources/icon-help.gif", 
@@ -242,8 +338,12 @@ public class PhraseResultPanel extends VerticalLayout {
 				"The \"Results by markup\" tab gives you the opportunity " +
 				"to untag markup for selected search results in the Kwic-view.");
 		
-		rightComponent.addComponent(helpLabel);
-		rightComponent.setComponentAlignment(helpLabel, Alignment.TOP_RIGHT);
+		kwicButtonPanel.addComponent(helpLabel);
+		kwicButtonPanel.setExpandRatio(helpLabel, 1f);
+		kwicButtonPanel.setComponentAlignment(helpLabel, Alignment.MIDDLE_RIGHT);
+		
+		rightComponent.addComponent(kwicButtonPanel);
+		rightComponent.setComponentAlignment(kwicButtonPanel, Alignment.MIDDLE_RIGHT);
 		
 		splitPanel.addComponent(rightComponent);
 		addComponent(splitPanel);

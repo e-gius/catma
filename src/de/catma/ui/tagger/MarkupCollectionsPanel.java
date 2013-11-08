@@ -24,10 +24,10 @@ import java.beans.PropertyChangeSupport;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Logger;
 
 import org.vaadin.dialogs.ConfirmDialog;
 
@@ -51,12 +51,14 @@ import com.vaadin.ui.Window.Notification;
 import de.catma.CatmaApplication;
 import de.catma.document.repository.Repository;
 import de.catma.document.repository.Repository.RepositoryChangeEvent;
+import de.catma.document.standoffmarkup.usermarkup.TagInstanceInfo;
 import de.catma.document.standoffmarkup.usermarkup.TagReference;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollection;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionManager;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionReference;
 import de.catma.indexer.IndexedRepository;
 import de.catma.indexer.Indexer;
+import de.catma.indexer.TagsetDefinitionUpdateLog;
 import de.catma.tag.PropertyDefinition;
 import de.catma.tag.TagDefinition;
 import de.catma.tag.TagInstance;
@@ -87,6 +89,7 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 
 	}
 	
+	private Logger logger = Logger.getLogger(this.getClass().getName());
 	private TreeTable markupCollectionsTree;
 	private String userMarkupItem = "User Markup Collections";
 	private String staticMarkupItem = "Static Markup Collections";
@@ -311,6 +314,7 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 					new CMenuAction<UserMarkupCollection>("Refresh") {
 				@Override
 				public void handle(UserMarkupCollection umc) {
+					//TODO: close all active tagsets
 					UserMarkupCollectionReference umcRef =
 							new UserMarkupCollectionReference(umc.getId(), umc.getContentInfoSet());
 					removeUserMarkupCollection(umcRef);
@@ -357,11 +361,8 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 			Indexer indexer = ((IndexedRepository)repository).getIndexer();
 			indexer.reindex(
 					tagsetDef, 
-					Collections.<byte[]>emptySet(), 
-					umc, 
-					repository.getSourceDocument(
-						new UserMarkupCollectionReference(
-							umc.getId(), umc.getContentInfoSet())).getID());
+					new TagsetDefinitionUpdateLog(), 
+					umc);
 			getWindow().showNotification(
 				"Information", "Reindexing finished!", 
 				Notification.TYPE_TRAY_NOTIFICATION);
@@ -381,11 +382,8 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 			for (TagsetDefinition tagsetDef : umc.getTagLibrary()) {
 				indexer.reindex(
 					tagsetDef, 
-					Collections.<byte[]>emptySet(), 
-					umc, 
-					repository.getSourceDocument(
-						new UserMarkupCollectionReference(
-							umc.getId(), umc.getContentInfoSet())).getID());
+					new TagsetDefinitionUpdateLog(), 
+					umc);
 			}
 			getWindow().showNotification(
 					"Information", "Reindexing finished!", 
@@ -431,6 +429,7 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 				userMarkupCollectionManager.getUserMarkupCollection(
 						userMarkupCollectionReference);
 		if (userMarkupCollection != null) {
+			
 			for (TagsetDefinition tagsetDefinition : 
 				userMarkupCollection.getTagLibrary()) {
 				
@@ -445,6 +444,11 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 				}
 			}
 			
+			logger.info(
+					"removing UserMarkupCollection " 
+							+ userMarkupCollection + "#" 
+							+ userMarkupCollection.getId()
+							+ " from MarkupCollectionsPanel.Tree");
 			removeWithChildrenFromTree(userMarkupCollection);
 			fireWritableUserMarkupCollectionSelected(userMarkupCollection, false);
 			userMarkupCollectionManager.remove(userMarkupCollection);
@@ -871,15 +875,26 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 		if (selected) {
 			for (UserMarkupCollection umc : userMarkupCollectionManager) {
 				if (!umc.equals(userMarkupCollection)) {
-					Object writeablePropertyValue = 
+					Item umcItem = 
 						markupCollectionsTree.getItem(
-							umc).getItemProperty(
+							umc);
+					if (umcItem != null) {
+						Object writeablePropertyValue = 
+							umcItem.getItemProperty(
 								MarkupCollectionsTreeProperty.writable).getValue();
-					
-					if ((writeablePropertyValue != null) 
-							&& (writeablePropertyValue instanceof CheckBox)) {
-						CheckBox cbWritable = (CheckBox)writeablePropertyValue;
-						cbWritable.setValue(false);
+						
+						if ((writeablePropertyValue != null) 
+								&& (writeablePropertyValue instanceof CheckBox)) {
+							CheckBox cbWritable = (CheckBox)writeablePropertyValue;
+							cbWritable.setValue(false);
+						}
+					}
+					else {
+						logger.warning(
+							"[" + getApplication().getUser() 
+							+ "] could not find UserMarkupCollection " 
+							+ umc + "#" + umc.getId() 
+							+ " in the MarkupCollectionsPanel.Tree!");
 					}
 				}
 			}
@@ -1084,7 +1099,7 @@ public class MarkupCollectionsPanel extends VerticalLayout {
 		updateableforeignTagsetDefinitions.remove(tagsetDefinition);
 	}
 
-	public List<Pair<String,TagInstance>> getTagInstances(List<String> instanceIDs) {
+	public List<TagInstanceInfo> getTagInstances(List<String> instanceIDs) {
 		return userMarkupCollectionManager.getTagInstances(instanceIDs);
 	}
 

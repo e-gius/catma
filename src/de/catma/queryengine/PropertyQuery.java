@@ -20,12 +20,14 @@
 package de.catma.queryengine;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 import de.catma.document.Range;
 import de.catma.document.repository.Repository;
+import de.catma.document.source.ContentInfoSet;
 import de.catma.document.source.SourceDocument;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollection;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollectionReference;
@@ -37,7 +39,6 @@ import de.catma.queryengine.result.TagQueryResultRow;
 import de.catma.tag.PropertyDefinition;
 import de.catma.tag.TagDefinition;
 import de.catma.tag.TagsetDefinition;
-import de.catma.util.ContentInfoSet;
 
 
 /**
@@ -51,14 +52,16 @@ public class PropertyQuery extends Query {
 
     private String propertyName;
     private String propertyValue;
-
+    private String tagPhrase;
+    private TagMatchMode tagMatchMode;
+    
     /**
      * Constructor
      * @param property the name of the {@link org.DBIndexProperty.tag.Property}
      * @param value the value of the {@link org.DBIndexProperty.tag.Property} this is optional and can be
      * <code>null</code>
      */
-    public PropertyQuery(Phrase property, Phrase value) {
+    public PropertyQuery(Phrase tag, Phrase property, Phrase value, String tagMatchMode) {
         propertyName = property.getPhrase();
         if (value != null) {
             propertyValue = value.getPhrase();
@@ -66,6 +69,25 @@ public class PropertyQuery extends Query {
         else {
             propertyValue = null;
         }
+        if (tag != null){
+        	this.tagPhrase = tag.getPhrase();
+        }
+        else {
+        	this.tagPhrase = null;
+        }
+        
+        if (tagMatchMode != null) {
+        	try {
+        		this.tagMatchMode = TagMatchMode.valueOf(tagMatchMode.toUpperCase());
+        	}
+        	catch (IllegalArgumentException iae) {
+        		this.tagMatchMode = TagMatchMode.EXACT;
+        	}
+        }
+        else {
+        	this.tagMatchMode = TagMatchMode.EXACT;
+        }
+
     }
 
     @Override
@@ -93,28 +115,35 @@ public class PropertyQuery extends Query {
         		return new QueryResultRowArray();
         	}
         }
-        Set<String> propertyDefinitionIDs = new HashSet<String>();
-        for (String userMarkupCollID : relevantUserMarkupCollIDs) {
-        	UserMarkupCollection umc = 
-        			repository.getUserMarkupCollection(
-        				new UserMarkupCollectionReference(
-        						userMarkupCollID, new ContentInfoSet()));
-        	for (TagsetDefinition tagsetDefinition : umc.getTagLibrary()) {
-        		for (TagDefinition tagDef : tagsetDefinition) {
-        			PropertyDefinition pd = 
-        					tagDef.getPropertyDefinitionByName(propertyName); 
-        			if (pd != null) {
-        				propertyDefinitionIDs.add(pd.getUuid());
-        			}
-        		}
-        	}
-        }
         
+        Set<String> propertyDefinitionIDs = new HashSet<String>();
+//        for (String userMarkupCollID : relevantUserMarkupCollIDs) {
+//        	UserMarkupCollection umc = 
+//        			repository.getUserMarkupCollection(
+//        				new UserMarkupCollectionReference(
+//        						userMarkupCollID, new ContentInfoSet()));
+//        	for (TagsetDefinition tagsetDefinition : umc.getTagLibrary()) {
+//        		
+//        		for (TagDefinition tagDef : tagsetDefinition) {
+//        			
+//        			PropertyDefinition pd = 
+//        					tagDef.getPropertyDefinitionByName(propertyName); 
+//        			if (pd != null) {
+//        				propertyDefinitionIDs.add(pd.getUuid());
+//        			}
+//        		}
+//        	}
+//        }
+//        
+//        if (propertyDefinitionIDs.isEmpty()) {
+//        	return new QueryResultRowArray();
+//        }
         
         QueryResult result = 
 				indexer.searchProperty(
+						relevantUserMarkupCollIDs,
 						propertyDefinitionIDs,
-						propertyName, propertyValue);
+						propertyName, propertyValue, tagPhrase);
 
         Set<SourceDocument> toBeUnloaded = new HashSet<SourceDocument>();
 
@@ -147,5 +176,10 @@ public class PropertyQuery extends Query {
         }
         
         return result;
+    }
+    
+    @Override
+    public Comparator<QueryResultRow> getComparator() {
+    	return tagMatchMode.getComparator();
     }
 }

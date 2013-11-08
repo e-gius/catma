@@ -25,9 +25,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
-import org.hibernate.SessionFactory;
+import javax.naming.NamingException;
 
-import de.catma.indexer.db.model.DBTerm;
+import de.catma.indexer.db.model.Term;
 import de.catma.queryengine.result.GroupedQueryResult;
 import de.catma.queryengine.result.PhraseResult;
 import de.catma.queryengine.result.QueryResultRow;
@@ -35,34 +35,38 @@ import de.catma.queryengine.result.QueryResultRowArray;
 
 public class LazyDBPhraseQueryResult implements GroupedQueryResult {
 	
-	private SessionFactory sessionFactory;
-	private Map<String, DBTerm> termsByDocument;
+	private Map<String, Term> termsByDocument;
 	private String term;
 	private QueryResultRowArray queryResultRowArray;
+	private Map<String,Integer> freqByDocument;
 
-	public LazyDBPhraseQueryResult(
-			SessionFactory sessionFactory, String term) {
-		this.sessionFactory = sessionFactory;
+	public LazyDBPhraseQueryResult(String term) {
 		this.term = term;
-		termsByDocument = new HashMap<String, DBTerm>();
+		termsByDocument = new HashMap<String, Term>();
 	}
 
 	public Iterator<QueryResultRow> iterator() {
 		if (queryResultRowArray == null) {
-			loadQueryResultRows();
+			try {
+				loadQueryResultRows();
+			}
+			catch (NamingException ne) {
+				throw new RuntimeException(ne);
+			}
 		}
 		return queryResultRowArray.iterator();
 	}
 
-	private void loadQueryResultRows() {
+	private void loadQueryResultRows() throws NamingException {
 		queryResultRowArray = new QueryResultRowArray();
-		PhraseSearcher phraseSearcher = new PhraseSearcher(sessionFactory);
+		freqByDocument = new HashMap<String, Integer>();
+		PhraseSearcher phraseSearcher = new PhraseSearcher();
 		for (String sourceDocumentID : getSourceDocumentIDs()) {
-			queryResultRowArray.addAll(
-				phraseSearcher.getPositionsForTerm(
-					term, 
-					sourceDocumentID, 
-					0)); // no limit
+			QueryResultRowArray positions =
+					phraseSearcher.getPositionsForTerm(
+							term, 
+							sourceDocumentID);
+			queryResultRowArray.addAll(positions);
 		}
 	}
 
@@ -71,8 +75,13 @@ public class LazyDBPhraseQueryResult implements GroupedQueryResult {
 	}
 
 	public int getTotalFrequency() {
+		
+		if (queryResultRowArray != null) {
+			return queryResultRowArray.size();
+		}
+		
 		int sum = 0;
-		for (DBTerm t : termsByDocument.values()) {
+		for (Term t : termsByDocument.values()) {
 			sum += t.getFrequency();
 		}
 		return sum;
@@ -80,6 +89,12 @@ public class LazyDBPhraseQueryResult implements GroupedQueryResult {
 
 	public int getFrequency(String sourceDocumentID) {
 		if (termsByDocument.containsKey(sourceDocumentID)) {
+			if (queryResultRowArray != null) {
+				if (!freqByDocument.containsKey(sourceDocumentID)) {
+					freqByDocument.put(sourceDocumentID, computeFrequency(sourceDocumentID));
+				}
+				return freqByDocument.get(sourceDocumentID);
+			}
 			return termsByDocument.get(sourceDocumentID).getFrequency();
 		}
 		else {
@@ -87,11 +102,21 @@ public class LazyDBPhraseQueryResult implements GroupedQueryResult {
 		}
 	}
 
+	private int computeFrequency(String sourceDocumentID) {
+		int freq = 0;
+		for (QueryResultRow row : queryResultRowArray) {
+			if (row.getSourceDocumentId().equals(sourceDocumentID)) {
+				freq++;
+			}
+		}
+		return freq;
+	}
+
 	public Set<String> getSourceDocumentIDs() {
 		return termsByDocument.keySet();
 	}
 
-	void addTerm(DBTerm t) {
+	void addTerm(Term t) {
 		termsByDocument.put(t.getDocumentId(), t);
 	}
 

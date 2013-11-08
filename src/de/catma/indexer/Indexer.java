@@ -19,6 +19,7 @@
 package de.catma.indexer;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 
@@ -42,16 +43,15 @@ public interface Indexer {
 			List<TagReference> tagReferences,
 			String sourceDocumentID,
 			String userMarkupCollectionID,
-			TagLibrary tagLibrary) throws Exception;
+			TagLibrary tagLibrary) throws IOException;
 	
-	public void removeSourceDocument(String sourceDocumentID) throws Exception;
-	public void removeUserMarkupCollection(String userMarkupCollectionID) throws Exception;
-	public void removeTagReferences(List<TagReference> tagReferences) throws Exception;
+	public void removeSourceDocument(String sourceDocumentID) throws IOException;
+	public void removeUserMarkupCollection(String userMarkupCollectionID) throws IOException;
+	public void removeTagReferences(List<TagReference> tagReferences) throws IOException;
 	public void reindex(
 			TagsetDefinition tagsetDefinition, 
-			Set<byte[]> deletedTagDefinitionUuids,
-			UserMarkupCollection userMarkupCollection,
-			String sourceDocumentID) throws IOException;
+			TagsetDefinitionUpdateLog tagsetDefinitionUpdateLog,
+			UserMarkupCollection userMarkupCollection) throws IOException;
 
 	
 	public QueryResult searchPhrase(
@@ -63,15 +63,16 @@ public interface Indexer {
 	
 	public QueryResult searchTagDefinitionPath(
 			List<String> userMarkupCollectionIdList, 
-			String tagDefinitionPath) throws Exception;
+			String tagDefinitionPath) throws IOException;
 	
-	public QueryResult searchProperty(Set<String> propertyDefinitionIDs,
-			String propertyName, String propertyValue);
+	public QueryResult searchProperty(
+			List<String> userMarkupCollectionIdList, Set<String> propertyDefinitionIDs,
+			String propertyName, String propertyValue, String tagValue) throws IOException;
 	
 	public QueryResult searchFreqency(
 			List<String> documentIdList, 
 			CompareOperator comp1, int freq1, 
-			CompareOperator comp2, int freq2);
+			CompareOperator comp2, int freq2) throws IOException;
 	
 	public SpanContext getSpanContextFor(String sourceDocumentId, Range range,
 	            int spanContextSize, SpanDirection direction) throws IOException;
@@ -80,11 +81,13 @@ public interface Indexer {
 			QueryResult baseResult, QueryResult collocationConditionResult,
 			int spanContextSize, SpanDirection direction) throws IOException;
 	
-	public List<TermInfo> getTermInfosFor(String sourceDocumentId, Range range);
+	public List<TermInfo> getTermInfosFor(String sourceDocumentId, Range range) throws IOException;
 	
 	public void close();
 
 	public void updateIndex(TagInstance tagInstance, Property property) throws IOException;
+
+	public void removeUserMarkupCollections(Collection<String> usermarkupCollectionIDs) throws IOException;
 
 
 }

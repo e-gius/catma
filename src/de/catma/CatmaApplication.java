@@ -22,8 +22,13 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -32,6 +37,7 @@ import org.vaadin.jouni.animator.Animator;
 import com.vaadin.Application;
 import com.vaadin.terminal.ClassResource;
 import com.vaadin.terminal.ExternalResource;
+import com.vaadin.terminal.ParameterHandler;
 import com.vaadin.ui.Alignment;
 import com.vaadin.ui.HorizontalLayout;
 import com.vaadin.ui.Label;
@@ -52,6 +58,7 @@ import de.catma.document.Range;
 import de.catma.document.repository.Repository;
 import de.catma.document.repository.RepositoryManager;
 import de.catma.document.repository.RepositoryPropertyKey;
+import de.catma.document.source.KeywordInContext;
 import de.catma.document.source.SourceDocument;
 import de.catma.document.standoffmarkup.usermarkup.UserMarkupCollection;
 import de.catma.indexer.IndexedRepository;
@@ -63,8 +70,6 @@ import de.catma.ui.ProgressWindow;
 import de.catma.ui.analyzer.AnalyzerManagerView;
 import de.catma.ui.analyzer.AnalyzerManagerWindow;
 import de.catma.ui.analyzer.AnalyzerProvider;
-import de.catma.ui.analyzer.VisualizationManagerView;
-import de.catma.ui.analyzer.VisualizationManagerWindow;
 import de.catma.ui.menu.LoginLogoutCommand;
 import de.catma.ui.menu.Menu;
 import de.catma.ui.menu.MenuFactory;
@@ -75,9 +80,13 @@ import de.catma.ui.tagger.TaggerManagerWindow;
 import de.catma.ui.tagger.TaggerView;
 import de.catma.ui.tagmanager.TagManagerView;
 import de.catma.ui.tagmanager.TagManagerWindow;
+import de.catma.ui.visualizer.VisualizationManagerView;
+import de.catma.ui.visualizer.VisualizationManagerWindow;
 
 public class CatmaApplication extends Application
-	implements BackgroundServiceProvider, AnalyzerProvider {
+	implements BackgroundServiceProvider, AnalyzerProvider, ParameterHandler {
+	
+	private static AtomicInteger userCount = new AtomicInteger(0);
 	
 	private static final String VERSION = 
 			"(v"+new SimpleDateFormat("yyyy/MM/dd-HH:mm").format(new Date())+")";
@@ -97,6 +106,8 @@ public class CatmaApplication extends Application
 	private ProgressWindow progressWindow;
 	private VisualizationManagerView visualizationManagerView;
 	private Logger logger = Logger.getLogger(this.getClass().getName());
+	private Map<String,String[]> parameters = new HashMap<String, String[]>();
+	private boolean repositoryOpened = false;
 
 	@Override
 	public void init() {
@@ -105,8 +116,8 @@ public class CatmaApplication extends Application
 		backgroundService = new BackgroundService(this);
 		
 		
-		final Window mainWindow = new Window("CATMA 4 - CLÉA " + VERSION);
-		
+		final Window mainWindow = new Window("CATMA 4.1 - CLÃ‰A " + VERSION);
+		mainWindow.addParameterHandler(this);
 		HorizontalLayout mainLayout = new HorizontalLayout();
 		mainLayout.setSizeUndefined();
 		mainLayout.setMargin(true);
@@ -163,6 +174,11 @@ public class CatmaApplication extends Application
 			mainLayout.setComponentAlignment(aboutLink, Alignment.TOP_RIGHT);
 			mainLayout.setExpandRatio(aboutLink, 1.0f);
 			
+			Link helpLink = new Link(
+					"Help", new ExternalResource(getURL()+"manual/"));
+			helpLink.setTargetName("_blank");
+			mainLayout.addComponent(helpLink);
+			mainLayout.setComponentAlignment(helpLink, Alignment.TOP_RIGHT);
 			
 			Label helpLabel = new Label();
 			helpLabel.setIcon(new ClassResource(
@@ -208,7 +224,22 @@ public class CatmaApplication extends Application
 		setTheme("cleatheme");
 	}
 	
+	public void handleParameters(Map<String, String[]> parameters) {
+		this.parameters.putAll(parameters);
+	}
 	
+	public Map<String, String[]> getParameters() {
+		return Collections.unmodifiableMap(parameters);
+	}
+	
+	public String getParameter(String key) {
+		String[] values = parameters.get(key);
+		if ((values != null) && (values.length > 0)) {
+			return values[0];
+		}
+		
+		return null;
+	}
 	private void initTempDirectory(Properties properties) throws IOException {
 		String tempDirProp = properties.getProperty(RepositoryPropertyKey.TempDir.name());
 		File tempDir = new File(tempDirProp);
@@ -249,7 +280,11 @@ public class CatmaApplication extends Application
 	}
 
 	public void openRepository(Repository repository) {
+		repositoryOpened = true;
+		userCount.incrementAndGet();
+		logger.info("user" + getUser() + " has been added to user count (" + getUserCount() + ")" );
 		repositoryManagerView.openRepository(repository);
+		logger.info("repository has been opened for user" + getUser());
 	}
 	 
 	public void openTagLibrary(Repository repository, TagLibrary tagLibrary) {
@@ -293,16 +328,17 @@ public class CatmaApplication extends Application
 		defaultProgressIndicator.setVisible(enabled);
 		defaultProgressIndicator.setCaption(caption);
 		
-		if (enabled) {
-			if (progressWindow.getParent() == null) {
-				getMainWindow().addWindow(progressWindow);
-			}
-		}
-		else {
-			if (progressWindow.getParent() != null) {
-				getMainWindow().removeWindow(progressWindow);
-			}
-		}
+		//TODO: enable progress window together with background loading
+//		if (enabled) {
+//			if (progressWindow.getParent() == null) {
+//				getMainWindow().addWindow(progressWindow);
+//			}
+//		}
+//		else {
+//			if (progressWindow.getParent() != null) {
+//				getMainWindow().removeWindow(progressWindow);
+//			}
+//		}
 		defaultProgressIndicator.setEnabled(enabled);
 		
 	}
@@ -371,12 +407,18 @@ public class CatmaApplication extends Application
 	@Override
 	public void close() {
 		repositoryManagerView.getRepositoryManager().close();
+		logger.info("application for user" + getUser() + " has been closed");
+		if (repositoryOpened) {
+			repositoryOpened = false;
+			userCount.decrementAndGet();
+			logger.info("user" + getUser() + " has been substracted from user count (" + getUserCount() + ")" );
+		}
 		super.close();
 	}
 	
 	
 	public void showAndLogError(String message, Throwable e) {
-		logger.log(Level.SEVERE, message, e);
+		logger.log(Level.SEVERE, "["+getUser()+"]" + message, e);
 		
 		if (message == null) {
 			message = "internal error"; 
@@ -386,7 +428,8 @@ public class CatmaApplication extends Application
 			"Error", 
 			"An error has occurred!<br />" +
 			"We've been notified about this error and it will be fixed soon.<br />" +
-			"The underlying error message is:<br />" + message, 
+			"The underlying error message is:<br />" + message +
+			"<br />" + e.getMessage(), 
 			Notification.TYPE_ERROR_MESSAGE);
 	}
 
@@ -395,5 +438,19 @@ public class CatmaApplication extends Application
 		TaggerView tv = openSourceDocument(sd, repository);
 		tv.show(range);
 	}
-	
+
+	public void addDoubleTree(List<KeywordInContext> kwics) {
+		if (visualizationManagerView.getApplication() == null) {
+			menu.executeEntry(visualizationManagerView);
+		}
+		else {
+			visualizationManagerView.getWindow().bringToFront();
+		}
+
+		visualizationManagerView.addDoubleTree(kwics);
+	}
+
+	public static int getUserCount() {
+		return userCount.get();
+	}
 }
